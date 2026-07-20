@@ -108,3 +108,103 @@ No CPU fallback path — the premise is quality + speed.
 Single in/out trim + Lanczos resize + per-frame 256-color palette +
 blue-noise dither already beats every consumer GIF tool on quality.
 Live preview + size estimate validates the WebGPU pipeline end-to-end.
+
+## Architecture
+
+### Pipeline
+
+```
+File
+ → Demux (mp4box.js — MP4/MOV only for MVP)
+ → WebCodecs VideoDecoder → VideoFrame
+ → [Resize] Lanczos compute shader → GPUTexture at target res
+ → [Palette] GPU histogram (32³ bins) → readback → CPU median-cut → 256 colors
+ → [Quantize + Dither] compute shader: blue-noise offset + nearest palette → u8 indices
+ → [Readback] GPU → CPU (Uint8Array of palette indices per frame)
+ → [LZW + GIF assembly] CPU, in encode worker
+ → Blob → download
+```
+
+Two modes share the pipeline:
+
+- **Preview** — process one frame on demand as user scrubs or adjusts
+  knobs. Debounced (~100ms). Output → canvas, not LZW.
+- **Encode** — stream sequentially through in→out range. One frame
+  resident on GPU at a time; release before decoding next. Peak memory
+  ≈ 1 frame at source res + 1 at target res.
+
+### Frame management
+
+Three tiers, never fully materialized:
+
+| Tier | Resolution | Storage | Lifecycle |
+|------|-----------|---------|-----------|
+| Thumbnails | ~160px wide | CPU `ImageBitmap[]` | Lazy-decoded as timeline scrolls |
+| Working frame | Full source | GPU texture, 3–5 max (LRU) | Around playhead, evicted on seek |
+| Encode stream | Full source | 1 GPU texture | Per-frame, released immediately |
+
+Random access: on file load, build a **keyframe index** from the demuxer.
+Scrubbing near playhead decodes forward from cache. Far seeks flush the
+decoder, seek to nearest keyframe, decode forward to target.
+
+### WebGPU compute shaders
+
+1. **resize.wgsl** — Lanczos-3 separable filter. One dispatch per output
+   pixel. Input: source GPUTexture + target dims. Output: resized GPUTexture.
+2. **histogram.wgsl** — 32×32×32 RGB histogram. Workgroups tile the image,
+   accumulate in shared memory, atomicAdd to a storage buffer (32K × u32).
+3. **quantize.wgsl** — per-pixel: add blue-noise offset (tiled 64×64
+   texture, baked in), brute-force nearest among 256 palette entries.
+   Output: u8 index buffer.
+
+Palette generation (median-cut on 32K histogram bins) stays on CPU —
+recursive, branch-heavy, microseconds on the readback data.
+
+### Worker layout
+
+```
+Main thread                  Decode worker           Encode worker
+─────────────                ─────────────           ─────────────
+Svelte UI                    mp4box.js demuxer       LZW compress
+WebGPU device + queue        VideoDecoder            GIF89a assembly
+Canvas rendering             → VideoFrames to main   → Blob / progress
+User interaction
+```
+
+WebGPU on main thread for MVP — `copyExternalImageToTexture` needs
+VideoFrame and device on the same thread. GPU dispatches are async /
+non-blocking so UI stays responsive.
+
+### Svelte structure
+
+**Stores**: `project`, `timeline`, `quality`, `preview`, `encode`
+
+**Components**:
+- `App.svelte` — layout shell + drop zone
+- `Preview.svelte` — dual canvas, A/B split
+- `Timeline.svelte` — lazy thumbnail strip, in/out handles, playhead, keys
+- `QualityPanel.svelte` — resolution, fps, dither toggle, loop count
+- `SizeEstimate.svelte` — live readout (updates on debounced knob changes)
+- `ExportBar.svelte` — encode trigger, progress, download
+
+**Lib modules**:
+- `lib/decode.ts` — decoder worker wrapper, keyframe index, seek
+- `lib/gpu.ts` — device init, pipeline creation, shader modules
+- `lib/resize.wgsl`, `lib/histogram.wgsl`, `lib/quantize.wgsl`
+- `lib/palette.ts` — median-cut on histogram (CPU)
+- `lib/gif.ts` — LZW encoder + GIF89a container
+- `lib/estimate.ts` — sample 8 frames, LZW-encode, extrapolate
+
+### Size estimation
+
+Sample-based: pick ~8 evenly-spaced frames from in/out range, run full
+pipeline including LZW, average bytes-per-frame × total frames + header.
+Re-run on same samples when knobs change. Accurate to ~10–15%.
+
+### Decisions log
+
+- **Demuxer**: mp4box.js only (MP4/MOV). WebM demuxer deferred.
+- **Thumbnails**: lazy-decode as timeline scrolls (not eager on load).
+- **Preview latency**: ~100ms debounce on knob changes, not realtime.
+- **Palette gen**: GPU histogram + CPU median-cut (not GPU k-means).
+- **GPU thread**: main thread for MVP (avoids VideoFrame transfer cost).
