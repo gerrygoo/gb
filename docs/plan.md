@@ -9,10 +9,10 @@ completed; future sessions start by reading this file to find the frontier.
 > Done when: `npm run dev` serves a page with a drop zone that logs the
 > file name to console.
 
-- [ ] `npm create vite` with Svelte + TypeScript template
-- [ ] Strip boilerplate, set up directory structure (`src/lib/`, `src/components/`)
-- [ ] Add `DropZone.svelte` — accepts video files, emits file handle
-- [ ] Verify dev server runs, drop zone works
+- [x] `npm create vite` with Svelte + TypeScript template
+- [x] Strip boilerplate, set up directory structure (`src/lib/`, `src/components/`)
+- [x] Add `DropZone.svelte` — accepts video files, emits file handle
+- [x] Verify dev server runs, drop zone works
 
 ## Phase 2 — Decode pipeline
 > Done when: drop an MP4, see the first decoded frame rendered to a
