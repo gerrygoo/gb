@@ -18,15 +18,15 @@ completed; future sessions start by reading this file to find the frontier.
 > Done when: drop an MP4, see the first decoded frame rendered to a
 > `<canvas>` on screen.
 
-- [ ] Add mp4box.js dependency
-- [ ] `lib/demux.ts` — wrap mp4box: open file → extract video track info
+- [x] Add mp4box.js dependency
+- [x] `lib/demux.ts` — wrap mp4box: open file → extract video track info
   (codec string, width, height, frame count, sample table) → emit
   `EncodedVideoChunk`s with timestamps and keyframe flags
-- [ ] `lib/decode.ts` — wrap `VideoDecoder`: accept chunks → emit
+- [x] `lib/decode.ts` — wrap `VideoDecoder`: accept chunks → emit
   `VideoFrame`s. Build keyframe index from demuxer output.
-- [ ] Wire into `App.svelte`: file drop → demux → decode first frame →
+- [x] Wire into `App.svelte`: file drop → demux → decode first frame →
   draw to canvas via `drawImage(videoFrame, ...)`
-- [ ] Verify with a real MP4 (H.264 baseline + H.264 high + H.265 if
+- [x] Verify with a real MP4 (H.264 baseline + H.264 high + H.265 if
   browser supports)
 
 ## Phase 3 — WebGPU bootstrap
