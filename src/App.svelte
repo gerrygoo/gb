@@ -1,11 +1,38 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import DropZone from './components/DropZone.svelte';
   import { demux } from './lib/demux';
   import { buildKeyframeIndex, createFrameDecoder } from './lib/decode';
+  import { initGPU, setGPUContext, runTestShader } from './lib/gpu';
 
   let fileName = '';
   let status = '';
   let canvas: HTMLCanvasElement;
+  let gpuStatus = 'initializing…';
+
+  // Called synchronously during component init so setContext is legal;
+  // descendants await this promise to get the resolved device.
+  const gpuContext = initGPU();
+  setGPUContext(gpuContext);
+
+  onMount(async () => {
+    try {
+      const { adapter, device } = await gpuContext;
+      const count = 256;
+      const result = await runTestShader(device, count);
+
+      const expected = Uint32Array.from({ length: count }, (_, i) => i);
+      const matches = result.every((v, i) => v === expected[i]);
+
+      const info = adapter.info;
+      const adapterLabel = info?.description || info?.vendor || 'unknown adapter';
+      gpuStatus = matches
+        ? `WebGPU ready (${adapterLabel}) — test shader readback verified (${count}/${count} values)`
+        : 'WebGPU ready but test shader readback did not match expected values';
+    } catch (err) {
+      gpuStatus = `WebGPU unavailable: ${(err as Error).message}`;
+    }
+  });
 
   function drawFrame(frame: VideoFrame) {
     canvas.width = frame.displayWidth;
@@ -57,6 +84,7 @@
 
 <main>
   <h1>gif builder</h1>
+  <p class="gpu-status">{gpuStatus}</p>
   <DropZone on:file={handleFile} />
   {#if fileName}
     <p class="file-name">{fileName}</p>
@@ -90,6 +118,13 @@
   .status {
     font-size: 0.85rem;
     color: #666;
+  }
+
+  .gpu-status {
+    font-size: 0.75rem;
+    color: #666;
+    text-align: center;
+    max-width: 480px;
   }
 
   canvas {

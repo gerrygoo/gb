@@ -33,11 +33,11 @@ completed; future sessions start by reading this file to find the frontier.
 > Done when: a trivial compute shader runs and writes to a storage buffer
 > that reads back correctly.
 
-- [ ] `lib/gpu.ts` — request adapter + device, handle feature detection,
+- [x] `lib/gpu.ts` — request adapter + device, handle feature detection,
   surface error messages for unsupported browsers
-- [ ] Write a minimal test shader (e.g., fill a buffer with thread IDs)
-- [ ] Read back buffer to CPU, verify values
-- [ ] Add GPU device to Svelte app context so all components can access it
+- [x] Write a minimal test shader (e.g., fill a buffer with thread IDs)
+- [x] Read back buffer to CPU, verify values
+- [x] Add GPU device to Svelte app context so all components can access it
 
 ## Phase 4 — Lanczos resize shader
 > Done when: a dropped video's first frame is resized to a target
