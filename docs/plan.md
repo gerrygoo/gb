@@ -43,13 +43,13 @@ completed; future sessions start by reading this file to find the frontier.
 > Done when: a dropped video's first frame is resized to a target
 > resolution on the GPU and displayed on a canvas.
 
-- [ ] `lib/shaders/resize.wgsl` — separable Lanczos-3 kernel. Two passes
+- [x] `lib/shaders/resize.wgsl` — separable Lanczos-3 kernel. Two passes
   (horizontal then vertical). Input: source texture + uniforms (src dims,
   dst dims, kernel radius). Output: destination texture.
-- [ ] `lib/resize.ts` — pipeline setup, bind groups, dispatch helper
-- [ ] Wire: VideoFrame → `copyExternalImageToTexture` → resize pipeline →
+- [x] `lib/resize.ts` — pipeline setup, bind groups, dispatch helper
+- [x] Wire: VideoFrame → `copyExternalImageToTexture` → resize pipeline →
   `copyTextureToBuffer` → readback → draw to canvas
-- [ ] Visual verification: compare against browser `drawImage` resize at
+- [x] Visual verification: compare against browser `drawImage` resize at
   several target sizes (480p, 320p, 160p)
 
 ## Phase 5 — Histogram + palette
