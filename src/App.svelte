@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import DropZone from './components/DropZone.svelte';
   import Timeline from './components/Timeline.svelte';
+  import QualityPanel from './components/QualityPanel.svelte';
+  import Preview from './components/Preview.svelte';
   import { demux, type DemuxResult } from './lib/demux';
   import { decodeAllFrames, nearestKeyframeAtOrBefore } from './lib/decode';
   import { createFrameSeeker, type FrameSeeker } from './lib/seek';
@@ -12,8 +15,7 @@
   import { quantize, indicesToImageData } from './lib/quantize';
   import { encodeGif, type GifFrame } from './lib/gif';
   import { statusText, withBusy } from './lib/status';
-
-  const RESIZE_PRESETS = [480, 320, 160];
+  import { quality, resetQualityForSource } from './lib/quality';
 
   let fileName = '';
   let status = '';
@@ -22,7 +24,6 @@
   let browserCanvas: HTMLCanvasElement;
   let gpuStatus = 'initializing…';
   let resizeStatus = '';
-  let targetHeight = RESIZE_PRESETS[0];
 
   let sourceBitmap: ImageBitmap | null = null;
   let sourceTexture: GPUTexture | null = null;
@@ -34,10 +35,12 @@
   let palette: Uint8Array | null = null;
   let paletteStatus = '';
 
-  let quantizedCanvas: HTMLCanvasElement;
-  let sourceAbCanvas: HTMLCanvasElement;
   let quantizeStatus = '';
   let quantizedIndices: Uint32Array | null = null;
+  let previewWidth = 0;
+  let previewHeight = 0;
+  let previewSourceImageData: ImageData | null = null;
+  let previewQuantizedImageData: ImageData | null = null;
 
   let currentDemux: DemuxResult | null = null;
   let exportStatus = '';
@@ -97,12 +100,16 @@
     }
   }
 
-  async function runResize(height: number) {
+  /** Runs resize → histogram → palette → quantize on the current playhead frame at the
+   * current quality settings. Generalizes what used to be a preset-height-only `runResize`. */
+  async function runQualityPipeline() {
     if (!sourceBitmap || !sourceTexture) return;
     const bitmap = sourceBitmap;
     const srcTexture = sourceTexture;
+    const { targetWidth, dither } = get(quality);
 
-    const width = Math.round((height * sourceWidth) / sourceHeight / 2) * 2;
+    const width = Math.max(2, Math.round(targetWidth / 2) * 2);
+    const height = Math.max(2, Math.round((width * sourceHeight) / sourceWidth / 2) * 2);
     resizeStatus = `resizing to ${width}×${height}…`;
     paletteStatus = 'computing palette…';
 
@@ -122,10 +129,6 @@
         gpuCanvas.height = height;
         gpuCanvas.getContext('2d')?.putImageData(imageData, 0, 0);
 
-        sourceAbCanvas.width = width;
-        sourceAbCanvas.height = height;
-        sourceAbCanvas.getContext('2d')?.putImageData(imageData, 0, 0);
-
         browserCanvas.width = width;
         browserCanvas.height = height;
         browserCanvas.getContext('2d')?.drawImage(bitmap, 0, 0, width, height);
@@ -139,13 +142,14 @@
         paletteStatus = `256-color palette · median-cut over ${populatedBins} populated histogram bins`;
 
         quantizeStatus = 'quantizing + dithering…';
-        const indices = await quantize(device, texture, width, height, palette);
+        const indices = await quantize(device, texture, width, height, palette, dither);
         quantizedIndices = indices;
         const quantizedImageData = indicesToImageData(indices, palette, width, height);
-        quantizedCanvas.width = width;
-        quantizedCanvas.height = height;
-        quantizedCanvas.getContext('2d')?.putImageData(quantizedImageData, 0, 0);
-        quantizeStatus = `${width}×${height} · 256 colors · blue-noise dither`;
+        previewWidth = width;
+        previewHeight = height;
+        previewSourceImageData = imageData;
+        previewQuantizedImageData = quantizedImageData;
+        quantizeStatus = `${width}×${height} · 256 colors · ${dither ? 'blue-noise dither' : 'no dither'}`;
       } catch (err) {
         resizeStatus = `resize error: ${(err as Error).message}`;
         paletteStatus = '';
@@ -153,6 +157,48 @@
       }
     });
   }
+
+  // Both a quality-store change and a playhead seek can trigger a pipeline
+  // run; without serialization they can race the same way overlapping seeks
+  // did in Phase 8 (a later run's `resizedTexture?.destroy()` firing while an
+  // earlier run is still submitting GPU work against that texture). Mirrors
+  // the seek loop's "latest wins" queue below.
+  let pendingPipelineRun = false;
+  let pipelineRunning = false;
+  let pipelineLoopPromise: Promise<void> = Promise.resolve();
+
+  async function runPipelineLoop() {
+    pipelineRunning = true;
+    try {
+      while (pendingPipelineRun) {
+        pendingPipelineRun = false;
+        await runQualityPipeline();
+      }
+    } finally {
+      pipelineRunning = false;
+    }
+  }
+
+  function requestPipelineRun(): Promise<void> {
+    pendingPipelineRun = true;
+    if (!pipelineRunning) {
+      pipelineLoopPromise = runPipelineLoop();
+    }
+    return pipelineLoopPromise;
+  }
+
+  // Debounced pipeline re-run on quality changes (Phase 9). Fires immediately
+  // on subscription (Svelte store contract) — guarded by `sourceBitmap` so
+  // that no-op before a file is loaded.
+  let qualityDebounceHandle: ReturnType<typeof setTimeout> | null = null;
+  quality.subscribe(() => {
+    if (!sourceBitmap) return;
+    if (qualityDebounceHandle) clearTimeout(qualityDebounceHandle);
+    qualityDebounceHandle = setTimeout(() => {
+      qualityDebounceHandle = null;
+      requestPipelineRun();
+    }, 100);
+  });
 
   function downloadBlob(blob: Blob, filename: string) {
     const url = URL.createObjectURL(blob);
@@ -164,11 +210,12 @@
   }
 
   function exportSingleFrameGif() {
-    if (!quantizedIndices || !palette) return;
-    const width = quantizedCanvas.width;
-    const height = quantizedCanvas.height;
+    if (!quantizedIndices || !palette || !previewWidth || !previewHeight) return;
+    const width = previewWidth;
+    const height = previewHeight;
+    const { loopCount } = get(quality);
     const indices = Uint8Array.from(quantizedIndices);
-    const gifBytes = encodeGif(width, height, [{ indices, palette, delayCs: 10 }], 0);
+    const gifBytes = encodeGif(width, height, [{ indices, palette, delayCs: 10 }], loopCount);
     downloadBlob(new Blob([new Uint8Array(gifBytes)], { type: 'image/gif' }), 'frame.gif');
     exportStatus = `exported ${width}×${height} single-frame GIF (frame ${playhead + 1}) — ${gifBytes.length.toLocaleString()} bytes`;
   }
@@ -199,40 +246,100 @@
       for (const frame of leadInFrames) frame.close();
       const framesInRange = decodedFrames.slice(leadInCount);
 
+      const { targetWidth, fps: outputFps, dither, loopCount, speed } = get(quality);
+
+      // Resample source frames to the target output FPS by nearest-neighbor
+      // lookup on a synthetic timeline built from each frame's own `duration`
+      // (cumulative sum in array order) — this drops or duplicates source
+      // frames as needed rather than assuming output FPS == source FPS.
+      //
+      // Deliberately NOT using `VideoFrame.timestamp` (presentation time):
+      // this codebase's "frame index" convention is chunk/decode-order
+      // position (Timeline, seek.ts, and the in/out trim above all index by
+      // it), not presentation order. For a range trimmed out of a B-frame
+      // stream, the last chunk in the slice can have a presentation
+      // timestamp far ahead of its decode-order neighbors, which would throw
+      // off a timestamp-based total-duration calculation. `duration` stays
+      // uniform regardless.
+      let cursor = 0;
+      const frameStartUs = framesInRange.map((f) => {
+        const start = cursor;
+        cursor += f.duration ?? frameDurationUs;
+        return start;
+      });
+      const totalDurationUs = cursor;
+      const outputIntervalUs = 1_000_000 / outputFps;
+      const outputFrameCount = Math.max(1, Math.round(totalDurationUs / outputIntervalUs) || 1);
+
+      function nearestSourceIndex(tUs: number): number {
+        let lo = 0;
+        let hi = frameStartUs.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (frameStartUs[mid] < tUs) lo = mid + 1;
+          else hi = mid;
+        }
+        if (lo > 0 && Math.abs(frameStartUs[lo - 1] - tUs) <= Math.abs(frameStartUs[lo] - tUs)) {
+          return lo - 1;
+        }
+        return lo;
+      }
+
+      const tickIndices: number[] = [];
+      for (let k = 0; k < outputFrameCount; k++) {
+        tickIndices.push(nearestSourceIndex(k * outputIntervalUs));
+      }
+
+      // Close decoded frames that no tick references; frames that are
+      // referenced get closed lazily, exactly once, when their bitmap is made.
+      const usedIndices = new Set(tickIndices);
+      for (let i = 0; i < framesInRange.length; i++) {
+        if (!usedIndices.has(i)) framesInRange[i].close();
+      }
+
+      const bitmapCache = new Map<number, ImageBitmap>();
+      async function getBitmapFor(index: number): Promise<ImageBitmap> {
+        const cached = bitmapCache.get(index);
+        if (cached) return cached;
+        const frame = framesInRange[index];
+        const bitmap = await createImageBitmap(frame);
+        frame.close();
+        bitmapCache.set(index, bitmap);
+        return bitmap;
+      }
+
       const gifFrames: GifFrame[] = [];
       let width = 0;
       let height = 0;
+      const delayCs = Math.max(1, Math.round(100 / outputFps / speed));
 
-      for (let i = 0; i < framesInRange.length; i++) {
-        animExportStatus = `processing frame ${i + 1}/${framesInRange.length}…`;
-        const frame = framesInRange[i];
-        const durationUs = frame.duration ?? 100_000;
-        const bitmap = await createImageBitmap(frame);
-        frame.close();
+      for (let i = 0; i < tickIndices.length; i++) {
+        animExportStatus = `processing frame ${i + 1}/${tickIndices.length}…`;
+        const bitmap = await getBitmapFor(tickIndices[i]);
 
         const srcWidth = bitmap.width;
         const srcHeight = bitmap.height;
-        height = targetHeight;
-        width = Math.round((height * srcWidth) / srcHeight / 2) * 2;
+        width = Math.max(2, Math.round(targetWidth / 2) * 2);
+        height = Math.max(2, Math.round((width * srcHeight) / srcWidth / 2) * 2);
 
         const srcTexture = frameToTexture(device, bitmap);
-        bitmap.close();
         const { texture: resizedTexture } = resize(device, srcTexture, srcWidth, srcHeight, width, height);
         srcTexture.destroy();
 
         const histogramCounts = await computeHistogram(device, resizedTexture, width, height);
         const framePalette = medianCut(histogramCounts);
-        const indices32 = await quantize(device, resizedTexture, width, height, framePalette);
+        const indices32 = await quantize(device, resizedTexture, width, height, framePalette, dither);
         resizedTexture.destroy();
 
-        const delayCs = Math.max(1, Math.round(durationUs / 10_000));
         gifFrames.push({ indices: Uint8Array.from(indices32), palette: framePalette, delayCs });
       }
 
+      for (const bitmap of bitmapCache.values()) bitmap.close();
+
       animExportStatus = 'encoding GIF…';
-      const gifBytes = encodeGif(width, height, gifFrames, 0);
+      const gifBytes = encodeGif(width, height, gifFrames, loopCount);
       downloadBlob(new Blob([new Uint8Array(gifBytes)], { type: 'image/gif' }), 'animation.gif');
-      animExportStatus = `exported ${gifFrames.length} frames, ${width}×${height} — ${gifBytes.length.toLocaleString()} bytes`;
+      animExportStatus = `exported ${gifFrames.length} frames, ${width}×${height} @ ${outputFps}fps — ${gifBytes.length.toLocaleString()} bytes`;
     } catch (err) {
       animExportStatus = `export error: ${(err as Error).message}`;
     } finally {
@@ -254,7 +361,7 @@
       const { device } = await gpuContext;
       sourceTexture?.destroy();
       sourceTexture = frameToTexture(device, bitmap);
-      await runResize(targetHeight);
+      await requestPipelineRun();
     } catch (err) {
       status = `seek error: ${(err as Error).message}`;
     }
@@ -321,6 +428,10 @@
     paletteStatus = '';
     quantizeStatus = '';
     quantizedIndices = null;
+    previewWidth = 0;
+    previewHeight = 0;
+    previewSourceImageData = null;
+    previewQuantizedImageData = null;
     currentDemux = null;
     exportStatus = '';
     animExportStatus = '';
@@ -346,6 +457,7 @@
       seeker = createFrameSeeker(config, chunks);
       outPoint = chunks.length - 1;
       frameDurationUs = chunks.reduce((sum, c) => sum + (c.duration ?? 33_000), 0) / chunks.length;
+      resetQualityForSource(track.codedWidth, track.codedHeight, 1_000_000 / frameDurationUs);
 
       status = `${track.codedWidth}×${track.codedHeight} · ${track.codec} · ${chunks.length} frames (${seeker.keyframes.chunkIndices.length} keyframes)`;
 
@@ -385,19 +497,7 @@
   {/if}
 
   {#if sourceBitmap}
-    <div class="resize-controls">
-      {#each RESIZE_PRESETS as preset}
-        <button
-          class:active={targetHeight === preset}
-          on:click={() => {
-            targetHeight = preset;
-            runResize(preset);
-          }}
-        >
-          {preset}p
-        </button>
-      {/each}
-    </div>
+    <QualityPanel {sourceWidth} {sourceHeight} />
     {#if resizeStatus}
       <p class="status">{resizeStatus}</p>
     {/if}
@@ -419,20 +519,16 @@
       </div>
     </div>
 
-    <h2 class="ab-heading">Source vs. quantized (256 colors, blue-noise dither)</h2>
+    <h2 class="ab-heading">Preview</h2>
     {#if quantizeStatus}
       <p class="status">{quantizeStatus}</p>
     {/if}
-    <div class="comparison">
-      <div class="comparison-pane">
-        <p class="pane-label">Source · Lanczos-3 resize</p>
-        <canvas bind:this={sourceAbCanvas}></canvas>
-      </div>
-      <div class="comparison-pane">
-        <p class="pane-label">Quantized · 256 colors + blue-noise dither</p>
-        <canvas bind:this={quantizedCanvas}></canvas>
-      </div>
-    </div>
+    <Preview
+      width={previewWidth}
+      height={previewHeight}
+      sourceImageData={previewSourceImageData}
+      quantizedImageData={previewQuantizedImageData}
+    />
 
     <h2 class="ab-heading">Export</h2>
     <div class="export-row">
@@ -509,26 +605,6 @@
 
   canvas.hidden {
     display: none;
-  }
-
-  .resize-controls {
-    display: flex;
-    gap: 8px;
-  }
-
-  .resize-controls button {
-    padding: 4px 12px;
-    border: 1px solid #444;
-    border-radius: 4px;
-    background: #1a1a1a;
-    color: #ccc;
-    cursor: pointer;
-    font-size: 0.85rem;
-  }
-
-  .resize-controls button.active {
-    border-color: #888;
-    color: #fff;
   }
 
   .export-row {

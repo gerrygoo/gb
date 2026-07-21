@@ -16,6 +16,11 @@
 @group(0) @binding(2) var<storage, read> palette: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> outIndices: array<u32>;
 
+struct Params {
+  ditherEnabled: u32,
+};
+@group(0) @binding(4) var<uniform> params: Params;
+
 const PALETTE_SIZE: u32 = 256u;
 const NOISE_SIZE: u32 = 64u;
 // Amplitude of the per-channel dither offset in 0-1 color space. Tuned by
@@ -32,13 +37,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
   let color = textureLoad(sourceTex, vec2<i32>(i32(id.x), i32(id.y)), 0);
 
-  let nx = id.x % NOISE_SIZE;
-  let ny = id.y % NOISE_SIZE;
-  let n0 = textureLoad(noiseTex, vec2<i32>(i32(nx), i32(ny)), 0).r;
-  let n1 = textureLoad(noiseTex, vec2<i32>(i32((nx + 17u) % NOISE_SIZE), i32((ny + 29u) % NOISE_SIZE)), 0).r;
-  let n2 = textureLoad(noiseTex, vec2<i32>(i32((nx + 37u) % NOISE_SIZE), i32((ny + 43u) % NOISE_SIZE)), 0).r;
-
-  let offset = (vec3<f32>(n0, n1, n2) - 0.5) * DITHER_AMPLITUDE;
+  var offset = vec3<f32>(0.0);
+  if (params.ditherEnabled != 0u) {
+    let nx = id.x % NOISE_SIZE;
+    let ny = id.y % NOISE_SIZE;
+    let n0 = textureLoad(noiseTex, vec2<i32>(i32(nx), i32(ny)), 0).r;
+    let n1 = textureLoad(noiseTex, vec2<i32>(i32((nx + 17u) % NOISE_SIZE), i32((ny + 29u) % NOISE_SIZE)), 0).r;
+    let n2 = textureLoad(noiseTex, vec2<i32>(i32((nx + 37u) % NOISE_SIZE), i32((ny + 43u) % NOISE_SIZE)), 0).r;
+    offset = (vec3<f32>(n0, n1, n2) - 0.5) * DITHER_AMPLITUDE;
+  }
   let dithered = color.rgb + offset;
 
   var bestIdx: u32 = 0u;

@@ -181,21 +181,64 @@ export trimmed to an in/out range confirmed byte-correct via ffprobe
 > count via UI controls. Preview updates within ~100ms of the last
 > slider change. A/B toggle works.
 
-- [ ] `QualityPanel.svelte`:
+- [x] `QualityPanel.svelte`:
   - Output resolution: width input with aspect-locked height, common
-    presets dropdown (480p, 320p, 240p, 160p, custom)
-  - Output FPS: slider or input (1–60, default = source FPS)
-  - Dither: toggle (blue-noise / none)
-  - Loop count: infinite / 1 / N
-- [ ] `quality` store — reactive, drives pipeline re-runs
-- [ ] `Preview.svelte`:
-  - Source canvas + quantized canvas
-  - A/B split mode: single canvas, vertical divider, drag to compare
+    presets (480p, 320p, 240p, 160p — buttons, not a dropdown; custom
+    width via the number field). Width is the driving dimension per
+    `lib/quality.ts`'s `targetWidth`, height always derived from source
+    aspect ratio — flipped from Phase 4–8's height-driven
+    `RESIZE_PRESETS`, per this phase's own checklist wording.
+  - Output FPS: range input, 1–60, defaults to source FPS on file load
+    (`resetQualityForSource`)
+  - Dither: toggle (blue-noise / none) — threaded all the way into
+    `quantize.wgsl` as a uniform flag (`Params.ditherEnabled`), not just
+    a UI-only checkbox; disabled skips the blue-noise sample entirely
+  - Loop count: infinite / 1 / N (N via a number field)
+- [x] `quality` store (`lib/quality.ts`) — first real Svelte store in the
+  codebase, scoped to just quality state as flagged in the handoff.
+  Reactive; App.svelte subscribes and drives pipeline re-runs off it.
+- [x] `Preview.svelte`:
+  - Two stacked canvases (source + quantized), `clip-path: inset()`
+    toggled by mode
+  - A/B split mode: drag the divider (pointer events) to compare
   - Mode toggle: source-only / quantized-only / split
-- [ ] Debounced pipeline: on quality store change, wait 100ms, then
-  re-run resize → histogram → palette → quantize on current frame
-- [ ] Speed control: slider or input (0.25×–4×), affects frame delay in
-  export
+- [x] Debounced pipeline: quality-store subscription in App.svelte
+  waits 100ms after the last change, then calls a generalized
+  `runQualityPipeline()` (replaces the old preset-only `runResize`).
+  Both this and playhead seeks now go through a shared "latest wins"
+  queue (`requestPipelineRun`/`runPipelineLoop`), mirroring Phase 8's
+  seek queue — needed because a seek-triggered and a debounce-triggered
+  pipeline run can otherwise race the same way overlapping seeks did
+  (a later run's texture `destroy()` firing while an earlier run is
+  still submitting GPU work against it).
+- [x] Speed control: range input, 0.25×–4×, scales export frame delay
+  (`delayCs = round(100 / fps / speed)`)
+- [x] Output FPS is a real independent control, not just a delay-value
+  change: `exportAnimatedGif` resamples decoded frames to the target
+  rate by nearest-neighbor lookup on a synthetic timeline built from
+  cumulative `VideoFrame.duration` (drops/duplicates frames as needed).
+  Deliberately not `VideoFrame.timestamp` (presentation time) — this
+  codebase indexes frames by chunk/decode-order position everywhere
+  (Timeline, `seek.ts`, in/out trim), and for a range trimmed out of a
+  B-frame stream the last chunk in the slice can carry a presentation
+  timestamp far ahead of its decode-order neighbors, which threw off an
+  earlier timestamp-based version of this calculation (caught via the
+  `multikey.mp4` test clip — first attempt exported 24 frames for an
+  exact 21-frame in/out range at matching fps; `.duration` stayed
+  uniform where `.timestamp` didn't, so the fix was cumulative-duration
+  instead of raw timestamps).
+
+Verified with Playwright (chromium, real Chrome channel): resolution
+presets and custom width, FPS/speed sliders, dither toggle (confirmed
+visually — dithered region shows blue-noise grain, non-dithered is flat),
+loop count (infinite/1/N), Preview's three modes and drag-to-compare
+divider, and exported GIF bytes checked directly (dimensions, frame
+count, Netscape loop count, frame delay) against the active quality
+settings on both a plain clip (`bars.mp4`) and the `multikey.mp4`
+B-frame/multi-keyframe clip trimmed to an in/out range. Also re-ran a
+rapid-scrub-while-changing-quality storm on `multikey.mp4` (mirroring
+the Phase 8 GPU-race regression test) — settled cleanly to Idle, no
+console errors, no GPU validation warnings.
 
 ## Phase 10 — Size estimation + export polish
 > Done when: a size estimate displays before encoding and updates live

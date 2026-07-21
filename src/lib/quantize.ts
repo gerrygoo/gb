@@ -22,6 +22,7 @@ function getPipeline(device: GPUDevice): QuantizePipeline {
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
     ],
   });
   const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
@@ -81,17 +82,29 @@ function createPaletteBuffer(device: GPUDevice, palette: Uint8Array): GPUBuffer 
   return buffer;
 }
 
-/** Quantizes an rgba16float `texture` against `palette` with blue-noise dither, returning one palette index per pixel. */
+/** Uploads the dither-enabled flag as a 16-byte-aligned uniform buffer (WGSL host-shareable struct rule). */
+function createParamsBuffer(device: GPUDevice, ditherEnabled: boolean): GPUBuffer {
+  const buffer = device.createBuffer({
+    size: 16,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(buffer, 0, new Uint32Array([ditherEnabled ? 1 : 0, 0, 0, 0]));
+  return buffer;
+}
+
+/** Quantizes an rgba16float `texture` against `palette`, optionally with blue-noise dither, returning one palette index per pixel. */
 export async function quantize(
   device: GPUDevice,
   texture: GPUTexture,
   width: number,
   height: number,
   palette: Uint8Array,
+  ditherEnabled = true,
 ): Promise<Uint32Array> {
   const { bindGroupLayout, pipeline } = getPipeline(device);
   const noiseTexture = getBlueNoiseTexture(device);
   const paletteBuffer = createPaletteBuffer(device, palette);
+  const paramsBuffer = createParamsBuffer(device, ditherEnabled);
 
   const pixelCount = width * height;
   const bufferSize = pixelCount * Uint32Array.BYTES_PER_ELEMENT;
@@ -112,6 +125,7 @@ export async function quantize(
       { binding: 1, resource: noiseTexture.createView() },
       { binding: 2, resource: { buffer: paletteBuffer } },
       { binding: 3, resource: { buffer: outBuffer } },
+      { binding: 4, resource: { buffer: paramsBuffer } },
     ],
   });
 
@@ -129,6 +143,7 @@ export async function quantize(
   readbackBuffer.unmap();
 
   paletteBuffer.destroy();
+  paramsBuffer.destroy();
   outBuffer.destroy();
   readbackBuffer.destroy();
 
