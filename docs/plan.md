@@ -135,16 +135,46 @@ completed; future sessions start by reading this file to find the frontier.
 > Done when: user can scrub through a video frame-by-frame, set in/out
 > points, and the export respects them.
 
-- [ ] `Timeline.svelte` — horizontal strip, playhead indicator,
+- [x] `Timeline.svelte` — horizontal strip, playhead indicator,
   click-to-seek, drag playhead
-- [ ] Keyboard nav: arrow keys (±1 frame), J/K/L (back/pause/forward),
+- [x] Keyboard nav: arrow keys (±1 frame), J/K/L (back/pause/forward),
   Home/End (first/last frame)
-- [ ] In/out handles: drag to set, or keyboard shortcuts (I/O)
-- [ ] Lazy thumbnail strip: decode thumbnails (~160px wide) on demand as
+- [x] In/out handles: drag to set, or keyboard shortcuts (I/O)
+- [x] Lazy thumbnail strip: decode thumbnails (~160px wide) on demand as
   the visible portion of the timeline changes. Cache decoded thumbnails.
-- [ ] Seeking logic: near-playhead → decode forward from cache; far seek →
-  flush decoder, seek to nearest keyframe, decode forward
-- [ ] Export range respects in/out points
+- [x] Seeking logic: `lib/seek.ts` — cache hit returns instantly; cache
+  miss decodes fresh from the nearest keyframe through the target with a
+  new decoder, caching every frame along the way (so nearby subsequent
+  seeks land in that cached sweep). Discovered mid-phase that Chrome's
+  `VideoDecoder` requires the first `decode()` call after *any* `flush()`
+  to be a keyframe again — undocumented in the spec text but enforced in
+  practice — which rules out incrementally continuing one decoder across
+  multiple flushes. The original design (persist one decoder, flush after
+  each partial forward decode) hit this immediately in testing; the fix
+  was to always start from the nearest keyframe on a cache miss rather
+  than trying to resume a flushed decoder.
+- [x] Export range respects in/out points — decode starts at the nearest
+  keyframe at or before the in point (decoder requirement), then lead-in
+  frames before the in point are closed and dropped before encoding.
+- [x] Busy/idle status indicator (`lib/status.ts`, folded in from the
+  previously-deferred ask): a small pill in the header shows whatever
+  async work is in flight (seeking, thumbnail decode, preview pipeline,
+  export) or "Idle".
+- [x] Fixed a GPU race surfaced by rapid scrubbing: overlapping seeks
+  could destroy a `GPUTexture` that an earlier seek's resize/quantize
+  pipeline was still submitting work against. Fixed with a "latest wins"
+  queue in `App.svelte` — `playhead` updates synchronously on every
+  request (so the UI and keyboard-nav math never lag), but only the most
+  recent target actually runs the GPU pipeline, and only one runs at a
+  time.
+
+Verified with Playwright (chromium, real Chrome channel) against four
+synthetic clips including one with 8 keyframes and B-frames
+(`multikey.mp4`, forced `-g 15`): click-to-seek, drag-to-scrub, drag
+in/out handles, all keyboard shortcuts, rapid-fire seeking (no GPU
+warnings), forward/backward seeks across GOP boundaries, and an animated
+export trimmed to an in/out range confirmed byte-correct via ffprobe
+(`nb_frames` matched `out − in + 1` exactly).
 
 ## Phase 9 — Quality panel + preview
 > Done when: user can adjust resolution, FPS, dither on/off, and loop

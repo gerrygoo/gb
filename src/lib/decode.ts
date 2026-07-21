@@ -11,6 +11,24 @@ export function buildKeyframeIndex(chunks: EncodedVideoChunk[]): KeyframeIndex {
   return { chunkIndices };
 }
 
+/** Largest keyframe chunk index that is <= frameIndex. Assumes chunkIndices[0] === 0. */
+export function nearestKeyframeAtOrBefore(keyframes: KeyframeIndex, frameIndex: number): number {
+  const { chunkIndices } = keyframes;
+  let lo = 0;
+  let hi = chunkIndices.length - 1;
+  let result = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (chunkIndices[mid] <= frameIndex) {
+      result = chunkIndices[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return result;
+}
+
 /** Wraps VideoDecoder: configured and ready to accept chunks, emitting VideoFrames via onFrame. */
 export function createFrameDecoder(
   config: VideoDecoderConfig,
