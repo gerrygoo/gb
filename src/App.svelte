@@ -5,6 +5,8 @@
   import { buildKeyframeIndex, createFrameDecoder } from './lib/decode';
   import { initGPU, setGPUContext, runTestShader } from './lib/gpu';
   import { frameToTexture, resize, textureToImageData } from './lib/resize';
+  import { computeHistogram } from './lib/histogram';
+  import { medianCut } from './lib/palette';
 
   const RESIZE_PRESETS = [480, 320, 160];
 
@@ -21,6 +23,11 @@
   let sourceTexture: GPUTexture | null = null;
   let sourceWidth = 0;
   let sourceHeight = 0;
+
+  let resizedTexture: GPUTexture | null = null;
+  let paletteCanvas: HTMLCanvasElement;
+  let palette: Uint8Array | null = null;
+  let paletteStatus = '';
 
   // Called synchronously during component init so setContext is legal;
   // descendants await this promise to get the resolved device.
@@ -53,17 +60,39 @@
     ctx?.drawImage(bitmap, 0, 0);
   }
 
+  function drawPalette(pal: Uint8Array) {
+    const swatchSize = 16;
+    const cols = 16;
+    const rows = 16;
+    paletteCanvas.width = cols * swatchSize;
+    paletteCanvas.height = rows * swatchSize;
+    const ctx = paletteCanvas.getContext('2d');
+    if (!ctx) return;
+    for (let i = 0; i < 256; i++) {
+      const x = (i % cols) * swatchSize;
+      const y = Math.floor(i / cols) * swatchSize;
+      ctx.fillStyle = `rgb(${pal[i * 3]}, ${pal[i * 3 + 1]}, ${pal[i * 3 + 2]})`;
+      ctx.fillRect(x, y, swatchSize, swatchSize);
+    }
+  }
+
   async function runResize(height: number) {
     if (!sourceBitmap || !sourceTexture) return;
 
     const width = Math.round((height * sourceWidth) / sourceHeight / 2) * 2;
     resizeStatus = `resizing to ${width}×${height}…`;
+    paletteStatus = 'computing palette…';
 
     try {
       const { device } = await gpuContext;
       const { texture } = resize(device, sourceTexture, sourceWidth, sourceHeight, width, height);
+
+      // Keep the resized texture alive for the histogram pass below; only
+      // destroy the previous one now that a new one exists.
+      resizedTexture?.destroy();
+      resizedTexture = texture;
+
       const imageData = await textureToImageData(device, texture, width, height);
-      texture.destroy();
 
       gpuCanvas.width = width;
       gpuCanvas.height = height;
@@ -74,8 +103,15 @@
       browserCanvas.getContext('2d')?.drawImage(sourceBitmap, 0, 0, width, height);
 
       resizeStatus = `${width}×${height} — GPU Lanczos-3 vs. browser drawImage`;
+
+      const histogramCounts = await computeHistogram(device, texture, width, height);
+      palette = medianCut(histogramCounts);
+      drawPalette(palette);
+      const populatedBins = histogramCounts.filter((count) => count > 0).length;
+      paletteStatus = `256-color palette · median-cut over ${populatedBins} populated histogram bins`;
     } catch (err) {
       resizeStatus = `resize error: ${(err as Error).message}`;
+      paletteStatus = '';
     }
   }
 
@@ -87,8 +123,12 @@
 
     sourceTexture?.destroy();
     sourceTexture = null;
+    resizedTexture?.destroy();
+    resizedTexture = null;
     sourceBitmap?.close();
     sourceBitmap = null;
+    palette = null;
+    paletteStatus = '';
 
     try {
       const { track, chunks } = await demux(file);
@@ -115,6 +155,11 @@
           reject,
         );
         decoder.decode(chunks[0]);
+        // Hardware decoders may buffer output indefinitely without a flush
+        // call — decode() alone doesn't guarantee the frame arrives promptly.
+        // Closing the decoder in onFrame above can abort this flush with an
+        // AbortError after the frame has already resolved; that's expected.
+        decoder.flush().catch(() => {});
       });
 
       sourceBitmap = await createImageBitmap(frame);
@@ -171,6 +216,13 @@
       <div class="comparison-pane">
         <p class="pane-label">Canvas 2D · drawImage</p>
         <canvas bind:this={browserCanvas}></canvas>
+      </div>
+      <div class="comparison-pane">
+        <p class="pane-label">Palette · median-cut (256 colors)</p>
+        {#if paletteStatus}
+          <p class="status">{paletteStatus}</p>
+        {/if}
+        <canvas bind:this={paletteCanvas} class="palette-canvas"></canvas>
       </div>
     </div>
   {/if}
@@ -262,5 +314,12 @@
     max-width: 45vw;
     border: 1px solid #333;
     border-radius: 4px;
+  }
+
+  .palette-canvas {
+    width: 256px;
+    height: 256px;
+    max-width: 45vw;
+    image-rendering: pixelated;
   }
 </style>

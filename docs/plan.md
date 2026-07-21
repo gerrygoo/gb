@@ -56,14 +56,17 @@ completed; future sessions start by reading this file to find the frontier.
 > Done when: drop a video, see a generated 256-color palette displayed
 > as a swatch grid next to the resized frame.
 
-- [ ] `lib/shaders/histogram.wgsl` — 32³ RGB histogram via shared-memory
-  accumulation + atomicAdd to storage buffer
-- [ ] `lib/histogram.ts` — pipeline + dispatch + readback
-- [ ] `lib/palette.ts` — median-cut on histogram data. Input: 32K bin
+- [x] `lib/shaders/histogram.wgsl` — 32³ RGB histogram, atomicAdd straight
+  to the global storage buffer (one thread per pixel; shared-memory
+  pre-accumulation skipped — the full histogram doesn't fit in the 16KB
+  default workgroup storage limit, and this only runs on a single still
+  frame so atomic contention is a non-issue)
+- [x] `lib/histogram.ts` — pipeline + dispatch + readback
+- [x] `lib/palette.ts` — median-cut on histogram data. Input: 32K bin
   counts. Output: `Uint8Array(256 * 3)` palette.
-- [ ] Wire: resized texture → histogram shader → readback → median-cut →
+- [x] Wire: resized texture → histogram shader → readback → median-cut →
   render palette swatches to a `<canvas>` or DOM grid
-- [ ] Verify palette looks reasonable for various content (animation,
+- [x] Verify palette looks reasonable for various content (animation,
   live action, gradients, flat color)
 
 ## Phase 6 — Quantize + dither shader
