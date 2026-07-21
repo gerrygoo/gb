@@ -7,6 +7,7 @@
   import { frameToTexture, resize, textureToImageData } from './lib/resize';
   import { computeHistogram } from './lib/histogram';
   import { medianCut } from './lib/palette';
+  import { quantize, indicesToImageData } from './lib/quantize';
 
   const RESIZE_PRESETS = [480, 320, 160];
 
@@ -28,6 +29,10 @@
   let paletteCanvas: HTMLCanvasElement;
   let palette: Uint8Array | null = null;
   let paletteStatus = '';
+
+  let quantizedCanvas: HTMLCanvasElement;
+  let sourceAbCanvas: HTMLCanvasElement;
+  let quantizeStatus = '';
 
   // Called synchronously during component init so setContext is legal;
   // descendants await this promise to get the resolved device.
@@ -98,6 +103,10 @@
       gpuCanvas.height = height;
       gpuCanvas.getContext('2d')?.putImageData(imageData, 0, 0);
 
+      sourceAbCanvas.width = width;
+      sourceAbCanvas.height = height;
+      sourceAbCanvas.getContext('2d')?.putImageData(imageData, 0, 0);
+
       browserCanvas.width = width;
       browserCanvas.height = height;
       browserCanvas.getContext('2d')?.drawImage(sourceBitmap, 0, 0, width, height);
@@ -109,9 +118,18 @@
       drawPalette(palette);
       const populatedBins = histogramCounts.filter((count) => count > 0).length;
       paletteStatus = `256-color palette · median-cut over ${populatedBins} populated histogram bins`;
+
+      quantizeStatus = 'quantizing + dithering…';
+      const indices = await quantize(device, texture, width, height, palette);
+      const quantizedImageData = indicesToImageData(indices, palette, width, height);
+      quantizedCanvas.width = width;
+      quantizedCanvas.height = height;
+      quantizedCanvas.getContext('2d')?.putImageData(quantizedImageData, 0, 0);
+      quantizeStatus = `${width}×${height} · 256 colors · blue-noise dither`;
     } catch (err) {
       resizeStatus = `resize error: ${(err as Error).message}`;
       paletteStatus = '';
+      quantizeStatus = '';
     }
   }
 
@@ -129,6 +147,7 @@
     sourceBitmap = null;
     palette = null;
     paletteStatus = '';
+    quantizeStatus = '';
 
     try {
       const { track, chunks } = await demux(file);
@@ -225,6 +244,21 @@
         <canvas bind:this={paletteCanvas} class="palette-canvas"></canvas>
       </div>
     </div>
+
+    <h2 class="ab-heading">Source vs. quantized (256 colors, blue-noise dither)</h2>
+    {#if quantizeStatus}
+      <p class="status">{quantizeStatus}</p>
+    {/if}
+    <div class="comparison">
+      <div class="comparison-pane">
+        <p class="pane-label">Source · Lanczos-3 resize</p>
+        <canvas bind:this={sourceAbCanvas}></canvas>
+      </div>
+      <div class="comparison-pane">
+        <p class="pane-label">Quantized · 256 colors + blue-noise dither</p>
+        <canvas bind:this={quantizedCanvas}></canvas>
+      </div>
+    </div>
   {/if}
 </main>
 
@@ -288,6 +322,13 @@
   .resize-controls button.active {
     border-color: #888;
     color: #fff;
+  }
+
+  .ab-heading {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #ccc;
+    margin: 8px 0 0;
   }
 
   .comparison {

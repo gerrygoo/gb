@@ -74,16 +74,20 @@ completed; future sessions start by reading this file to find the frontier.
 > with blue-noise dither, rendered on screen. It should look like a
 > high-quality GIF frame.
 
-- [ ] Generate or embed a 64×64 blue-noise texture (bake as a constant
-  array or load as a tiny asset)
-- [ ] `lib/shaders/quantize.wgsl` — per pixel: sample blue-noise, offset
-  RGB, brute-force nearest in 256-entry palette, write u8 index to
-  storage buffer
-- [ ] `lib/quantize.ts` — pipeline + dispatch + readback
-- [ ] Wire: resized texture + palette → quantize shader → index buffer →
+- [x] Generate or embed a 64×64 blue-noise texture (bake as a constant
+  array or load as a tiny asset) — generated offline via void-and-cluster,
+  verified against a DFT radial power spectrum (near-zero at low
+  frequencies rising to a plateau — the blue-noise signature), baked as
+  base64 in `lib/blueNoise.ts`
+- [x] `lib/shaders/quantize.wgsl` — per pixel: sample blue-noise, offset
+  RGB, brute-force nearest in 256-entry palette, write index to storage
+  buffer (`array<u32>`, not `u8` — WGSL storage buffers don't support u8
+  elements)
+- [x] `lib/quantize.ts` — pipeline + dispatch + readback
+- [x] Wire: resized texture + palette → quantize shader → index buffer →
   reconstruct RGBA from palette on CPU → draw to canvas
-- [ ] A/B compare: show source frame and quantized frame side by side
-- [ ] Verify dither quality: gradients should be smooth, no banding, no
+- [x] A/B compare: show source frame and quantized frame side by side
+- [x] Verify dither quality: gradients should be smooth, no banding, no
   obvious pattern at 1× zoom
 
 ## Phase 7 — GIF encoder
