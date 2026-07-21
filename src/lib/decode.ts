@@ -21,3 +21,19 @@ export function createFrameDecoder(
   decoder.configure(config);
   return decoder;
 }
+
+/** Decodes every chunk in order, awaiting flush() so all frames are guaranteed to have arrived before resolving. */
+export function decodeAllFrames(config: VideoDecoderConfig, chunks: EncodedVideoChunk[]): Promise<VideoFrame[]> {
+  return new Promise((resolve, reject) => {
+    const frames: VideoFrame[] = [];
+    const decoder = createFrameDecoder(config, (frame) => frames.push(frame), reject);
+    for (const chunk of chunks) decoder.decode(chunk);
+    decoder
+      .flush()
+      .then(() => {
+        decoder.close();
+        resolve(frames);
+      })
+      .catch(reject);
+  });
+}

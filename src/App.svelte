@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import DropZone from './components/DropZone.svelte';
-  import { demux } from './lib/demux';
-  import { buildKeyframeIndex, createFrameDecoder } from './lib/decode';
+  import { demux, type DemuxResult } from './lib/demux';
+  import { buildKeyframeIndex, createFrameDecoder, decodeAllFrames } from './lib/decode';
   import { initGPU, setGPUContext, runTestShader } from './lib/gpu';
   import { frameToTexture, resize, textureToImageData } from './lib/resize';
   import { computeHistogram } from './lib/histogram';
   import { medianCut } from './lib/palette';
   import { quantize, indicesToImageData } from './lib/quantize';
+  import { encodeGif, type GifFrame } from './lib/gif';
 
   const RESIZE_PRESETS = [480, 320, 160];
 
@@ -33,6 +34,12 @@
   let quantizedCanvas: HTMLCanvasElement;
   let sourceAbCanvas: HTMLCanvasElement;
   let quantizeStatus = '';
+  let quantizedIndices: Uint32Array | null = null;
+
+  let currentDemux: DemuxResult | null = null;
+  let exportStatus = '';
+  let animExportStatus = '';
+  let animExporting = false;
 
   // Called synchronously during component init so setContext is legal;
   // descendants await this promise to get the resolved device.
@@ -121,6 +128,7 @@
 
       quantizeStatus = 'quantizing + dithering…';
       const indices = await quantize(device, texture, width, height, palette);
+      quantizedIndices = indices;
       const quantizedImageData = indicesToImageData(indices, palette, width, height);
       quantizedCanvas.width = width;
       quantizedCanvas.height = height;
@@ -130,6 +138,80 @@
       resizeStatus = `resize error: ${(err as Error).message}`;
       paletteStatus = '';
       quantizeStatus = '';
+    }
+  }
+
+  function downloadBlob(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportSingleFrameGif() {
+    if (!quantizedIndices || !palette) return;
+    const width = quantizedCanvas.width;
+    const height = quantizedCanvas.height;
+    const indices = Uint8Array.from(quantizedIndices);
+    const gifBytes = encodeGif(width, height, [{ indices, palette, delayCs: 10 }], 0);
+    downloadBlob(new Blob([new Uint8Array(gifBytes)], { type: 'image/gif' }), 'frame.gif');
+    exportStatus = `exported ${width}×${height} single-frame GIF — ${gifBytes.length.toLocaleString()} bytes`;
+  }
+
+  async function exportAnimatedGif() {
+    if (!currentDemux || animExporting) return;
+    animExporting = true;
+    exportStatus = '';
+    const { track, chunks } = currentDemux;
+
+    try {
+      animExportStatus = `decoding ${chunks.length} frames…`;
+      const { device } = await gpuContext;
+      const decodedFrames = await decodeAllFrames(
+        { codec: track.codec, codedWidth: track.codedWidth, codedHeight: track.codedHeight, description: track.description },
+        chunks,
+      );
+
+      const gifFrames: GifFrame[] = [];
+      let width = 0;
+      let height = 0;
+
+      for (let i = 0; i < decodedFrames.length; i++) {
+        animExportStatus = `processing frame ${i + 1}/${decodedFrames.length}…`;
+        const frame = decodedFrames[i];
+        const durationUs = frame.duration ?? 100_000;
+        const bitmap = await createImageBitmap(frame);
+        frame.close();
+
+        const srcWidth = bitmap.width;
+        const srcHeight = bitmap.height;
+        height = targetHeight;
+        width = Math.round((height * srcWidth) / srcHeight / 2) * 2;
+
+        const srcTexture = frameToTexture(device, bitmap);
+        bitmap.close();
+        const { texture: resizedTexture } = resize(device, srcTexture, srcWidth, srcHeight, width, height);
+        srcTexture.destroy();
+
+        const histogramCounts = await computeHistogram(device, resizedTexture, width, height);
+        const framePalette = medianCut(histogramCounts);
+        const indices32 = await quantize(device, resizedTexture, width, height, framePalette);
+        resizedTexture.destroy();
+
+        const delayCs = Math.max(1, Math.round(durationUs / 10_000));
+        gifFrames.push({ indices: Uint8Array.from(indices32), palette: framePalette, delayCs });
+      }
+
+      animExportStatus = 'encoding GIF…';
+      const gifBytes = encodeGif(width, height, gifFrames, 0);
+      downloadBlob(new Blob([new Uint8Array(gifBytes)], { type: 'image/gif' }), 'animation.gif');
+      animExportStatus = `exported ${gifFrames.length} frames, ${width}×${height} — ${gifBytes.length.toLocaleString()} bytes`;
+    } catch (err) {
+      animExportStatus = `export error: ${(err as Error).message}`;
+    } finally {
+      animExporting = false;
     }
   }
 
@@ -148,13 +230,19 @@
     palette = null;
     paletteStatus = '';
     quantizeStatus = '';
+    quantizedIndices = null;
+    currentDemux = null;
+    exportStatus = '';
+    animExportStatus = '';
 
     try {
-      const { track, chunks } = await demux(file);
+      const demuxResult = await demux(file);
+      const { track, chunks } = demuxResult;
       if (chunks.length === 0) {
         status = 'no frames found';
         return;
       }
+      currentDemux = demuxResult;
 
       const keyframes = buildKeyframeIndex(chunks);
       status = 'decoding…';
@@ -259,6 +347,20 @@
         <canvas bind:this={quantizedCanvas}></canvas>
       </div>
     </div>
+
+    <h2 class="ab-heading">Export</h2>
+    <div class="export-row">
+      <button on:click={exportSingleFrameGif} disabled={!quantizedIndices}>Export current frame as GIF</button>
+      <button on:click={exportAnimatedGif} disabled={animExporting || !currentDemux}>
+        {animExporting ? 'Exporting…' : 'Export animated GIF (all frames)'}
+      </button>
+    </div>
+    {#if exportStatus}
+      <p class="status">{exportStatus}</p>
+    {/if}
+    {#if animExportStatus}
+      <p class="status">{animExportStatus}</p>
+    {/if}
   {/if}
 </main>
 
@@ -322,6 +424,26 @@
   .resize-controls button.active {
     border-color: #888;
     color: #fff;
+  }
+
+  .export-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .export-row button {
+    padding: 6px 14px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #1a1a1a;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+
+  .export-row button:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 
   .ab-heading {

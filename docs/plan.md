@@ -94,20 +94,41 @@ completed; future sessions start by reading this file to find the frontier.
 > Done when: drop a video, click "export", get a valid single-frame GIF
 > file downloaded. Then extend to multi-frame.
 
-- [ ] `lib/gif.ts` — GIF89a container writer:
+- [x] `lib/gif.ts` — GIF89a container writer:
   - Header + logical screen descriptor
   - Netscape looping extension
   - Per-frame: graphic control extension (delay, disposal method) +
     local color table + LZW-compressed pixel data
   - Trailer byte
-- [ ] `lib/lzw.ts` — LZW encoder for GIF (variable-width codes, clear
-  code, end code, code table reset at 4096)
-- [ ] Unit test LZW: encode small known inputs, verify against a
-  reference decoder (or just that the output GIF opens correctly)
-- [ ] Single-frame export: full pipeline → one indexed frame → GIF → download
-- [ ] Multi-frame export: decode N frames sequentially, pipeline each,
-  write GIF with frame delays derived from source FPS. Release GPU
-  resources per frame. Verify output plays correctly.
+- [x] `lib/lzw.ts` — LZW encoder for GIF (variable-width codes, clear
+  code, end code, code table reset at 4096). Subtle bug found and fixed:
+  a decoder can only materialize a new dictionary entry once it has
+  decoded the *next* code after the one that triggered it (needs that
+  code's first symbol) — so it's always one entry behind the encoder.
+  The encoder's code-size bump has to happen *before* assigning the
+  triggering entry (not after), so the growth point lines up with where
+  the decoder's mirrored, naturally-lagged check actually fires.
+- [x] Unit test LZW: round-tripped encode → independent reference GIF
+  LZW decoder (hand-rolled, in scratchpad) across empty/single-pixel/
+  flat-run/ascending/pseudo-random/small-alphabet inputs, including a
+  forced table-full reset at 4096 entries. This is what caught the bug
+  above (flat-run inputs cross the 9→10 bit code-size boundary in a way
+  smaller tests didn't).
+- [x] Single-frame export: "Export current frame as GIF" reuses the
+  already-quantized preview frame/palette, encodes, downloads. Verified
+  with ffmpeg/ffprobe (`file` + pixel comparison against source indices)
+  across all four synthetic test clips.
+- [x] Multi-frame export: "Export animated GIF" decodes every chunk via
+  `decodeAllFrames` (awaits `flush()` so all frames are guaranteed in
+  before returning), runs resize → histogram/palette → quantize per
+  frame with a fresh per-frame local color table, derives delay from
+  each frame's duration, releases per-frame GPU resources (textures
+  destroyed each iteration). Verified frame count via ffprobe and
+  visually confirmed the mandelbrot clip's zoom actually animates
+  frame-to-frame (caught and fixed a bug where `bitmap.close()` was
+  called before its `width`/`height` were read for the resize call,
+  which zeroes an ImageBitmap's dimensions and collapsed every frame to
+  the same degenerate 0×0 resize).
 - [ ] Move LZW + GIF assembly into an encode Web Worker
 
 ## Phase 8 — Timeline UI
