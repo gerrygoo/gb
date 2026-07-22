@@ -208,6 +208,22 @@
   <div class="readout">
     <span>frame {playhead + 1} / {frameCount}</span>
     <span class="in-out">in {inPoint + 1} · out {outPoint + 1}</span>
+    <span class="set-buttons">
+      <button
+        type="button"
+        on:click={() => dispatch('setIn', Math.min(playhead, outPoint))}
+        title="Set in point to current frame (I)"
+      >
+        Set start
+      </button>
+      <button
+        type="button"
+        on:click={() => dispatch('setOut', Math.max(playhead, inPoint))}
+        title="Set out point to current frame (O)"
+      >
+        Set end
+      </button>
+    </span>
   </div>
 
   <div
@@ -263,13 +279,35 @@
 
   .readout {
     display: flex;
-    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
     font-size: 0.75rem;
     color: #888;
   }
 
   .in-out {
     color: #666;
+    margin-right: auto;
+  }
+
+  .set-buttons {
+    display: flex;
+    gap: 6px;
+  }
+
+  .set-buttons button {
+    font-size: 0.7rem;
+    color: #ccc;
+    background: #1c1c1c;
+    border: 1px solid #333;
+    border-radius: 3px;
+    padding: 2px 8px;
+    cursor: pointer;
+  }
+
+  .set-buttons button:hover {
+    background: #262626;
+    border-color: #444;
   }
 
   .track {
