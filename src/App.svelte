@@ -8,7 +8,7 @@
   import SizeEstimate from './components/SizeEstimate.svelte';
   import ExportBar from './components/ExportBar.svelte';
   import { demux, type DemuxResult } from './lib/demux';
-  import { decodeAllFrames, nearestKeyframeAtOrBefore } from './lib/decode';
+  import { decodeFramesStreaming, isDecodeConfigSupported, nearestKeyframeAtOrBefore } from './lib/decode';
   import { createFrameSeeker, type FrameSeeker } from './lib/seek';
   import { initGPU, setGPUContext, runTestShader } from './lib/gpu';
   import { frameToTexture, resize, textureToImageData } from './lib/resize';
@@ -27,7 +27,18 @@
   let gpuCanvas: HTMLCanvasElement;
   let browserCanvas: HTMLCanvasElement;
   let gpuStatus = 'initializing…';
+  let gpuFailed = false;
   let resizeStatus = '';
+  let initialLoading = false;
+  let fileSizeWarning: string | null = null;
+  let showShortcutHelp = false;
+
+  /** Cheap check on the dropped File's on-disk size, right on drop — before
+   * demuxing even starts. Catches obviously-huge uploads fast; doesn't catch
+   * a small, highly-compressed file that decodes to a huge frame range
+   * (that's what SizeEstimate's decoded-range warning is for, once in/out
+   * points exist). Non-blocking — informational only. */
+  const FILE_SIZE_WARN_BYTES = 1_000_000_000;
 
   let sourceBitmap: ImageBitmap | null = null;
   let sourceTexture: GPUTexture | null = null;
@@ -87,8 +98,10 @@
       gpuStatus = matches
         ? `WebGPU ready (${adapterLabel}) — test shader readback verified (${count}/${count} values)`
         : 'WebGPU ready but test shader readback did not match expected values';
+      if (!matches) gpuFailed = true;
     } catch (err) {
       gpuStatus = `WebGPU unavailable: ${(err as Error).message}`;
+      gpuFailed = true;
     }
   });
 
@@ -328,36 +341,30 @@
     const leadInCount = from - rangeStart;
 
     try {
-      animExportStatus = `decoding ${rangeChunks.length} frames (in/out ${from + 1}–${to + 1})…`;
+      animExportStatus = `preparing export (in/out ${from + 1}–${to + 1})…`;
       const { device } = await gpuContext;
-      const decodedFrames = await decodeAllFrames(
-        { codec: track.codec, codedWidth: track.codedWidth, codedHeight: track.codedHeight, description: track.description },
-        rangeChunks,
-      );
-
-      const leadInFrames = decodedFrames.slice(0, leadInCount);
-      for (const frame of leadInFrames) frame.close();
-      const framesInRange = decodedFrames.slice(leadInCount);
-
       const { targetWidth, fps: outputFps, dither, loopCount, speed } = get(quality);
 
-      // Resample source frames to the target output FPS by nearest-neighbor
-      // lookup on a synthetic timeline built from each frame's own `duration`
-      // (cumulative sum in array order) — this drops or duplicates source
+      // Build the output timeline from the encoded chunks' own `duration` —
+      // this only needs demuxed chunk metadata, not decoded frames, so the
+      // tick schedule is ready before any decoding starts. Resamples to the
+      // target output FPS by nearest-neighbor lookup on a synthetic timeline
+      // (cumulative duration in array order) — drops or duplicates source
       // frames as needed rather than assuming output FPS == source FPS.
       //
-      // Deliberately NOT using `VideoFrame.timestamp` (presentation time):
-      // this codebase's "frame index" convention is chunk/decode-order
-      // position (Timeline, seek.ts, and the in/out trim above all index by
-      // it), not presentation order. For a range trimmed out of a B-frame
-      // stream, the last chunk in the slice can have a presentation
-      // timestamp far ahead of its decode-order neighbors, which would throw
-      // off a timestamp-based total-duration calculation. `duration` stays
-      // uniform regardless.
+      // Deliberately NOT using chunk `timestamp` (presentation time): this
+      // codebase's "frame index" convention is chunk/decode-order position
+      // (Timeline, seek.ts, and the in/out trim above all index by it), not
+      // presentation order. For a range trimmed out of a B-frame stream, the
+      // last chunk in the slice can have a presentation timestamp far ahead
+      // of its decode-order neighbors, which would throw off a
+      // timestamp-based total-duration calculation. `duration` stays uniform
+      // regardless.
+      const selectionChunks = chunks.slice(from, to + 1);
       let cursor = 0;
-      const frameStartUs = framesInRange.map((f) => {
+      const frameStartUs = selectionChunks.map((c) => {
         const start = cursor;
-        cursor += f.duration ?? frameDurationUs;
+        cursor += c.duration ?? frameDurationUs;
         return start;
       });
       const totalDurationUs = cursor;
@@ -383,24 +390,6 @@
         tickIndices.push(nearestSourceIndex(k * outputIntervalUs));
       }
 
-      // Close decoded frames that no tick references; frames that are
-      // referenced get closed lazily, exactly once, when their bitmap is made.
-      const usedIndices = new Set(tickIndices);
-      for (let i = 0; i < framesInRange.length; i++) {
-        if (!usedIndices.has(i)) framesInRange[i].close();
-      }
-
-      const bitmapCache = new Map<number, ImageBitmap>();
-      async function getBitmapFor(index: number): Promise<ImageBitmap> {
-        const cached = bitmapCache.get(index);
-        if (cached) return cached;
-        const frame = framesInRange[index];
-        const bitmap = await createImageBitmap(frame);
-        frame.close();
-        bitmapCache.set(index, bitmap);
-        return bitmap;
-      }
-
       let width = 0;
       let height = 0;
       let started = false;
@@ -408,14 +397,10 @@
       const delayCs = Math.max(1, Math.round(100 / outputFps / speed));
       animExportProgress = { current: 0, total: tickIndices.length };
 
-      for (let i = 0; i < tickIndices.length; i++) {
-        if (abort.signal.aborted) {
-          cancelled = true;
-          break;
-        }
-        animExportStatus = `processing frame ${i + 1}/${tickIndices.length}…`;
-        const bitmap = await getBitmapFor(tickIndices[i]);
-
+      /** Runs resize → histogram → palette → quantize → encode for one
+       * output tick against an already-decoded bitmap. Returns false if the
+       * export was cancelled mid-stage. */
+      async function processTick(bitmap: ImageBitmap): Promise<boolean> {
         const srcWidth = bitmap.width;
         const srcHeight = bitmap.height;
         ({ width, height } = computeOutputDims(targetWidth, srcWidth, srcHeight));
@@ -431,8 +416,7 @@
 
         if (abort.signal.aborted) {
           resizedTexture.destroy();
-          cancelled = true;
-          break;
+          return false;
         }
 
         const histogramCounts = await computeHistogram(device, resizedTexture, width, height);
@@ -440,24 +424,64 @@
         const indices32 = await quantize(device, resizedTexture, width, height, framePalette, dither);
         resizedTexture.destroy();
 
+        if (abort.signal.aborted) return false;
+
+        const ack = await worker.encodeFrame(Uint8Array.from(indices32), framePalette, delayCs);
+        animExportProgress = { current: ack.framesEncoded, total: tickIndices.length };
+        return true;
+      }
+
+      // `tickIndices` is non-decreasing (built from a monotonic output
+      // timeline), so needed source frames arrive in exactly the same order
+      // the decoder streams them out. That means at most one decoded frame
+      // is ever alive at once here — each is closed immediately if unneeded,
+      // or right after its bitmap is made — rather than the whole in/out
+      // range being decoded and buffered up front.
+      animExportStatus = `exporting ${tickIndices.length} frames (in/out ${from + 1}–${to + 1})…`;
+      const streamConfig: VideoDecoderConfig = {
+        codec: track.codec,
+        codedWidth: track.codedWidth,
+        codedHeight: track.codedHeight,
+        description: track.description,
+      };
+
+      let k = 0;
+      let pos = 0;
+      decodeLoop: for await (const frame of decodeFramesStreaming(streamConfig, rangeChunks)) {
         if (abort.signal.aborted) {
+          frame.close();
           cancelled = true;
           break;
         }
 
-        const ack = await worker.encodeFrame(Uint8Array.from(indices32), framePalette, delayCs);
-        animExportProgress = { current: ack.framesEncoded, total: tickIndices.length };
-      }
+        const sourceIndex = pos - leadInCount;
+        pos++;
 
-      for (const bitmap of bitmapCache.values()) bitmap.close();
+        if (sourceIndex < 0 || k >= tickIndices.length || sourceIndex < tickIndices[k]) {
+          frame.close();
+          continue;
+        }
 
-      // On a normal run every used index passes through getBitmapFor (which
-      // closes its VideoFrame once consumed), so this is a no-op. On a
-      // cancelled run it isn't — indices past the break point were counted
-      // as "used" up front but never actually converted to a bitmap, so
-      // their VideoFrames would otherwise leak until GC.
-      for (const index of usedIndices) {
-        if (!bitmapCache.has(index)) framesInRange[index].close();
+        // sourceIndex === tickIndices[k]: the next needed source frame.
+        // Reuse one bitmap for every consecutive tick that maps to it (fps
+        // downsampling can repeat a source frame across several ticks).
+        const bitmap = await createImageBitmap(frame);
+        frame.close();
+        try {
+          while (k < tickIndices.length && tickIndices[k] === sourceIndex) {
+            animExportStatus = `processing frame ${k + 1}/${tickIndices.length}…`;
+            const ok = await processTick(bitmap);
+            k++;
+            if (!ok) {
+              cancelled = true;
+              break decodeLoop;
+            }
+          }
+        } finally {
+          bitmap.close();
+        }
+
+        if (k >= tickIndices.length) break;
       }
 
       if (cancelled) {
@@ -558,6 +582,11 @@
     fileName = file.name;
     status = 'demuxing…';
     resizeStatus = '';
+    initialLoading = true;
+    fileSizeWarning =
+      file.size > FILE_SIZE_WARN_BYTES
+        ? `Large file (${(file.size / 1024 ** 2).toFixed(0)} MB) — demuxing/decoding may be slow.`
+        : null;
 
     exportAbort?.abort();
     estimateAbort?.abort();
@@ -603,6 +632,13 @@
         codedHeight: track.codedHeight,
         description: track.description,
       };
+
+      const supported = await withBusy('checking codec support…', () => isDecodeConfigSupported(config));
+      if (!supported) {
+        status = `error: unsupported codec "${track.codec}" — this browser can't decode it. Try re-encoding to H.264 with ffmpeg/HandBrake, or use a different browser.`;
+        return;
+      }
+
       seeker = createFrameSeeker(config, chunks);
       outPoint = chunks.length - 1;
       frameDurationUs = chunks.reduce((sum, c) => sum + (c.duration ?? 33_000), 0) / chunks.length;
@@ -613,20 +649,53 @@
       await queueSeek(0);
     } catch (err) {
       status = `error: ${(err as Error).message}`;
+    } finally {
+      initialLoading = false;
+    }
+  }
+
+  function isTypingTarget(el: EventTarget | null): boolean {
+    if (!(el instanceof HTMLElement)) return false;
+    return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
+  }
+
+  function onGlobalKeydown(e: KeyboardEvent) {
+    if (e.key === '?' && !isTypingTarget(e.target)) {
+      e.preventDefault();
+      showShortcutHelp = !showShortcutHelp;
+    } else if (e.key === 'Escape' && showShortcutHelp) {
+      showShortcutHelp = false;
     }
   }
 </script>
 
+<svelte:window on:keydown={onGlobalKeydown} />
+
 <main>
   <h1>gif builder</h1>
-  <p class="gpu-status">{gpuStatus}</p>
+  <p class="gpu-status" class:gpu-failed={gpuFailed}>{gpuStatus}</p>
+  {#if gpuFailed}
+    <p class="gpu-blocking">
+      This browser can't run the GPU pipeline this tool needs. Try Chrome/Edge, or Safari 17+, with
+      hardware acceleration enabled.
+    </p>
+  {/if}
   <p class="busy-status" class:idle={$statusText === 'Idle'}>{$statusText}</p>
-  <DropZone on:file={handleFile} />
+  <DropZone on:file={handleFile} disabled={gpuFailed} />
   {#if fileName}
     <p class="file-name">{fileName}</p>
   {/if}
+  {#if fileSizeWarning}
+    <p class="warning-text">{fileSizeWarning}</p>
+  {/if}
   {#if status}
     <p class="status">{status}</p>
+  {/if}
+  {#if initialLoading}
+    <div class="loading-row">
+      <span class="spinner" aria-hidden="true"></span>
+      <span>Loading video…</span>
+    </div>
   {/if}
   <canvas bind:this={canvas} class:hidden={!fileName}></canvas>
 
@@ -702,6 +771,49 @@
   {/if}
 </main>
 
+<button
+  class="help-fab"
+  title="Keyboard shortcuts (?)"
+  aria-label="Show keyboard shortcuts"
+  on:click={() => (showShortcutHelp = !showShortcutHelp)}
+>
+  ?
+</button>
+
+{#if showShortcutHelp}
+  <div
+    class="shortcut-overlay"
+    on:click={() => (showShortcutHelp = false)}
+    on:keydown={(e) => e.key === 'Enter' && (showShortcutHelp = false)}
+    role="button"
+    tabindex="0"
+    aria-label="Close keyboard shortcuts"
+  >
+    <div
+      class="shortcut-panel"
+      on:click|stopPropagation
+      on:keydown|stopPropagation
+      role="dialog"
+      tabindex="-1"
+      aria-label="Keyboard shortcuts"
+    >
+      <div class="shortcut-header">
+        <h2>Keyboard shortcuts</h2>
+        <button class="close" aria-label="Close" on:click={() => (showShortcutHelp = false)}>×</button>
+      </div>
+      <dl>
+        <dt>← / →</dt><dd>Step ±1 frame</dd>
+        <dt>Home / End</dt><dd>Jump to first / last frame</dd>
+        <dt>J / L</dt><dd>Play backward / forward</dd>
+        <dt>K</dt><dd>Pause playback</dd>
+        <dt>I / O</dt><dd>Set in / out point at playhead</dd>
+        <dt>?</dt><dd>Toggle this help</dd>
+        <dt>Esc</dt><dd>Close this help</dd>
+      </dl>
+    </div>
+  </div>
+{/if}
+
 <style>
   main {
     display: flex;
@@ -751,6 +863,140 @@
     color: #666;
     text-align: center;
     max-width: 480px;
+  }
+
+  .gpu-status.gpu-failed {
+    color: #e08a8a;
+  }
+
+  .gpu-blocking {
+    font-size: 0.85rem;
+    color: #e08a8a;
+    text-align: center;
+    max-width: 480px;
+    border: 1px solid #663333;
+    background: rgba(224, 138, 138, 0.08);
+    border-radius: 6px;
+    padding: 8px 14px;
+    margin: -12px 0 0;
+  }
+
+  .warning-text {
+    font-size: 0.8rem;
+    color: #e0b84a;
+    text-align: center;
+    max-width: 480px;
+  }
+
+  .loading-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.9rem;
+    color: #aaa;
+  }
+
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #333;
+    border-top-color: #7ec4e0;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .help-fab {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid #444;
+    background: #1a1a1a;
+    color: #ccc;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    z-index: 10;
+  }
+
+  .help-fab:hover {
+    border-color: #888;
+    color: #fff;
+  }
+
+  .shortcut-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+  }
+
+  .shortcut-panel {
+    background: #1a1a1a;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 20px 24px;
+    max-width: 360px;
+    width: 90vw;
+  }
+
+  .shortcut-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+
+  .shortcut-header h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin: 0;
+  }
+
+  .shortcut-header .close {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 1.2rem;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0 4px;
+  }
+
+  .shortcut-header .close:hover {
+    color: #fff;
+  }
+
+  dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 6px 16px;
+    margin: 0;
+  }
+
+  dt {
+    font-size: 0.85rem;
+    color: #ccc;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  dd {
+    font-size: 0.85rem;
+    color: #999;
+    margin: 0;
   }
 
   canvas {
@@ -821,5 +1067,26 @@
     height: 256px;
     max-width: 45vw;
     image-rendering: pixelated;
+  }
+
+  @media (max-width: 700px) {
+    main {
+      gap: 16px;
+      padding: 0 4px;
+    }
+
+    .comparison {
+      gap: 16px;
+    }
+
+    .comparison-pane canvas,
+    .palette-canvas {
+      max-width: 90vw;
+    }
+
+    .help-fab {
+      right: 12px;
+      bottom: 12px;
+    }
   }
 </style>

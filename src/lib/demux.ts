@@ -35,7 +35,9 @@ function readTrackDescription(isoFile: ISOFile, track: Track): Uint8Array {
   };
   const box = entry.avcC ?? entry.hvcC;
   if (!box) {
-    throw new Error(`Unsupported codec: no avcC/hvcC box on track ${track.id}`);
+    throw new Error(
+      `Unsupported codec on track ${track.id} — only H.264 and H.265 video are supported. Try re-encoding with ffmpeg/HandBrake to H.264.`,
+    );
   }
 
   // avcC/hvcC's write() signature is typed for MultiBufferStream but only

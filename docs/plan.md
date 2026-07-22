@@ -332,17 +332,116 @@ to diverge.
 > Done when: the tool is end-to-end usable. Drop a video, trim, adjust
 > quality, preview, estimate size, export. No crashes on happy path.
 
-- [ ] Error handling: unsupported codec message, WebGPU unavailable
-  message, file-too-large warning
-- [ ] Loading states: spinner during initial decode, progress during
-  thumbnail generation
-- [ ] Keyboard shortcut help (? key → overlay)
-- [ ] Responsive layout: panels stack vertically on narrow viewports
-- [ ] Favicon + page title
-- [ ] Test with variety of real-world inputs: screen recordings, phone
-  video, animated content, short clips, long clips
-- [ ] Performance check: profile GPU pipeline, identify bottlenecks,
-  ensure encode doesn't lock UI
+- [x] **Decode-buffering fix** (not on the original checklist, but a
+  prerequisite the file-too-large warning exposed): `exportAnimatedGif`
+  used to call `decodeAllFrames` and hold the *entire* in/out range of
+  `VideoFrame`s in memory before any GPU work started (a Phase 7/8
+  leftover) — the thing docs/scoping.md's architecture section actually
+  meant by "stream sequentially... one frame resident on GPU at a time."
+  Confirmed with the user (chose the bigger refactor over a warn-only
+  patch). `lib/decode.ts`'s new `decodeFramesStreaming` is an async
+  generator with a bounded lookahead (`STREAM_LOOKAHEAD = 8` chunks) —
+  the decoder is never fed more than that far ahead of what the consumer
+  has taken, so memory is bounded by decoder pipeline depth, not by
+  range length. `exportAnimatedGif` now builds its output-fps resampling
+  timeline directly from the encoded chunks' own `duration` (no decode
+  needed for that), then streams frames one at a time: `tickIndices` is
+  non-decreasing, so needed source frames arrive in exactly consumption
+  order — at most one decoded frame is ever alive, closed immediately if
+  unneeded or right after its bitmap is made. This also deleted the old
+  `bitmapCache`/`usedIndices` leak-sweep machinery entirely — with
+  nothing buffered ahead, there's nothing left to sweep.
+  Found and fixed a real bug via the VFR test clip below: breaking out of
+  the `for await` early (once all needed ticks are satisfied, or on
+  cancel) calls the generator's `return()`, which resumes right at the
+  `yield` and skips the rest of the `while` loop — any `VideoFrame`s the
+  decoder had already produced into the internal lookahead buffer but
+  never yielded were leaking. Fixed by closing everything left in that
+  buffer in the generator's `finally`.
+- [x] Error handling:
+  - Unsupported codec: `lib/decode.ts`'s `isDecodeConfigSupported` wraps
+    `VideoDecoder.isConfigSupported()`, checked in `App.svelte`'s
+    `handleFile` right after demux, before the seeker is created —
+    surfaces a specific "this browser can't decode it, try re-encoding to
+    H.264" message instead of a generic downstream failure.
+    `demux.ts`'s existing no-avcC/hvcC throw also got a friendlier
+    message. `DropZone.svelte` now shows an inline message for a
+    non-video file instead of silently no-oping.
+  - WebGPU unavailable: now a *blocking* state, not just informational
+    text (the gap flagged in the handoff) — `gpuFailed` gates the drop
+    zone (`disabled`, including the underlying `<input>`) and shows a
+    dedicated message. Verified by forcing `navigator.gpu` to `undefined`
+    via a Playwright init script (browser flags didn't reliably remove
+    it) — gating renders correctly.
+  - File-too-large warning, both halves per the session-recorded
+    decision: (a) a cheap `file.size` check right on drop
+    (`FILE_SIZE_WARN_BYTES`, 1GB, non-blocking), and (b) a decoded-range
+    byte estimate (`outputWidth × outputHeight × 1.5 × frameCount`) added
+    to `SizeEstimate.svelte` alongside the existing >500-frame warning,
+    reusing the same `estimate` prop rather than a second reactive block.
+    Threshold 1.5GB — untested against a real "browser falls over" case,
+    same caveat as the original estimate.
+- [x] Loading states: `initialLoading` shows a spinner + "Loading
+  video…" from the start of `handleFile` through the first frame's
+  seek/pipeline run. Thumbnail generation now shows a sweeping progress
+  bar on the timeline track itself (`Timeline.svelte`'s `thumbsLoading`),
+  in addition to the existing header status pill.
+- [x] Keyboard shortcut help: `?` toggles an overlay (Escape or a
+  backdrop click closes it); a small `?` FAB in the corner does the same
+  by click. Verified via Playwright.
+- [x] Responsive layout: `@media` queries added to `App.svelte`,
+  `DropZone.svelte`, `QualityPanel.svelte`, `Timeline.svelte` (this
+  codebase's first — previously zero). Verified at a 380px viewport with
+  a loaded file: no horizontal scroll.
+- [x] Favicon + page title: were already in place from earlier phases
+  (`index.html`'s `<title>gif builder</title>` + `favicon.svg`) — no
+  change needed.
+- [x] Real-world input testing: existing suite was 100% ffmpeg `lavfi`
+  synthetic clips, never anything genuinely variable-frame-rate. No
+  camera/phone footage available in this environment, so built a
+  synthetic VFR clip instead (alternating static/motion segments through
+  `mpdecimate` + `-vsync vfr`, producing real non-uniform chunk
+  durations — mostly 1/30s with a few multi-second holds) and ran it
+  through the full pipeline including export. Output GIF verified
+  byte-correct (frame count, uniform per-export delay, loop count) via a
+  proper GIF block-structure parser — this is what caught the
+  decode-buffering leak above.
+- [x] Performance check: structural profiling (SwiftShader-only sandbox,
+  see below, makes wall-clock numbers non-representative of real
+  hardware — treated as smoke-test signal, not a real measurement).
+  Per-frame export cost breaks down as: hardware decode (already
+  overlapped with GPU work via the new streaming lookahead) → resize
+  (2-pass Lanczos compute) → histogram dispatch + CPU readback →
+  CPU median-cut → quantize dispatch + CPU readback → encode-worker
+  round-trip (LZW, off main thread). Identified bottleneck: the export
+  loop `await`s the encode worker's ack before starting the next frame's
+  GPU work, serializing two stages that run on different threads and
+  could otherwise overlap (GPU work for frame N+1 while the worker
+  LZW-compresses frame N) — not fixed this phase (scoping.md's own
+  architecture explicitly calls for one frame resident at a time, and
+  this is a genuine future optimization, not a Phase 11 blocker). GPU
+  readbacks (`mapAsync` round trips for histogram/quantize) are the other
+  likely-expensive stage structurally, though software rendering makes
+  exact proportions unreliable here. Confirmed encode doesn't lock the
+  UI: measured ~40–60ms/frame at 640×480 under SwiftShader across
+  `bars.mp4` (20 frames) and `multikey.mp4` (120 frames, B-frames) —
+  again a software-rendering number, not a hardware one, but useful as a
+  no-hang/no-freeze signal.
+
+Verified with Playwright (chromium, real Chrome channel): full suite
+re-run against `bars.mp4`, `multikey.mp4` (B-frames, trimmed in/out),
+the new `vfr.mp4`, and `long.mp4` (840 frames, cancel-path leak check) —
+zero console/page errors across the run once the decode-buffering leak
+above was fixed. All exported GIFs checked with a real block-structure
+GIF parser (not a naive byte scan — the first version of that parser
+produced false-positive GCE matches inside LZW-compressed data, which
+would have masked the real leak; ffprobe/PIL frame counts and delays
+cross-checked to confirm). Shortcut overlay open/close, narrow-viewport
+layout (no horizontal scroll at 380px), invalid-file-type messaging, and
+forced-WebGPU-unavailable gating all verified directly. `npm run check`
+(0 errors) and `npm run build` + `vite preview` smoke test (worker still
+bundles as its own chunk, export completes with zero console errors)
+also re-run per the Phase 10 precedent for dev/prod divergence.
 
 ---
 

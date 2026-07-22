@@ -20,6 +20,7 @@
   let trackWidth = 0;
   let slotFrames: number[] = [];
   let thumbVersion = 0;
+  let thumbsLoading = false;
 
   let dragging: 'playhead' | 'in' | 'out' | null = null;
   let lastDragSeekAt = 0;
@@ -42,9 +43,13 @@
       frames.push(Math.round((i / Math.max(1, slotCount - 1)) * lastFrame()));
     }
     slotFrames = frames;
+    thumbsLoading = true;
     loadThumbnails(frames, THUMB_DECODE_WIDTH)
       .then(() => thumbVersion++)
-      .catch((err) => console.error('thumbnail load failed', err));
+      .catch((err) => console.error('thumbnail load failed', err))
+      .finally(() => {
+        thumbsLoading = false;
+      });
   }
 
   function drawThumb(node: HTMLCanvasElement, params: { frame: number; version: number }) {
@@ -223,6 +228,10 @@
       {/each}
     </div>
 
+    {#if thumbsLoading}
+      <div class="thumb-loading" aria-hidden="true"></div>
+    {/if}
+
     <div
       class="range-dim range-dim-left"
       style="width: {frameToX(inPoint)}px"
@@ -335,5 +344,32 @@
     font-size: 0.7rem;
     color: #555;
     margin: 0;
+  }
+
+  .thumb-loading {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #7ec4e0, transparent);
+    background-size: 50% 100%;
+    animation: thumb-sweep 1s ease-in-out infinite;
+  }
+
+  @keyframes thumb-sweep {
+    0% {
+      background-position: -50% 0;
+    }
+    100% {
+      background-position: 150% 0;
+    }
+  }
+
+  @media (max-width: 600px) {
+    .readout {
+      flex-wrap: wrap;
+      gap: 4px;
+    }
   }
 </style>

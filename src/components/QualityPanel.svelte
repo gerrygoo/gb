@@ -187,4 +187,19 @@
     font-size: 0.8rem;
     color: #888;
   }
+
+  @media (max-width: 480px) {
+    .quality-panel {
+      padding: 10px 12px;
+    }
+
+    .label {
+      width: auto;
+    }
+
+    input[type='range'] {
+      min-width: 0;
+      flex-basis: 100%;
+    }
+  }
 </style>
