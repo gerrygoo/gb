@@ -39,16 +39,14 @@ function appendSubBlocks(dest: number[], data: Uint8Array): void {
   dest.push(0x00);
 }
 
-/**
- * Encodes `frames` as a GIF89a file. Each frame carries its own local color
- * table (no global color table) since frames may be quantized against
- * independent palettes.
- */
-export function encodeGif(width: number, height: number, frames: GifFrame[], loopCount = 0): Uint8Array {
+/** GIF89a trailer byte. */
+export const GIF_TRAILER = 0x3b;
+
+/** Header + Logical Screen Descriptor + Netscape looping extension — the part of a GIF89a file that precedes any frame data. No global color table since frames carry their own local ones. */
+export function gifHeader(width: number, height: number, loopCount = 0): Uint8Array {
   const bytes: number[] = [];
   appendAscii(bytes, GIF_HEADER);
 
-  // Logical Screen Descriptor.
   appendUint16LE(bytes, width);
   appendUint16LE(bytes, height);
   bytes.push(0x00); // packed: no global color table, color resolution 0, no sort, GCT size 0
@@ -63,32 +61,57 @@ export function encodeGif(width: number, height: number, frames: GifFrame[], loo
   appendUint16LE(bytes, loopCount);
   bytes.push(0x00);
 
-  for (const frame of frames) {
-    // Graphic Control Extension.
-    bytes.push(0x21, 0xf9, 0x04);
-    bytes.push(DISPOSAL_DO_NOT_DISPOSE);
-    appendUint16LE(bytes, frame.delayCs);
-    bytes.push(0x00); // transparent color index (unused)
-    bytes.push(0x00); // block terminator
+  return Uint8Array.from(bytes);
+}
 
-    // Image Descriptor.
-    bytes.push(0x2c);
-    appendUint16LE(bytes, 0); // left
-    appendUint16LE(bytes, 0); // top
-    appendUint16LE(bytes, width);
-    appendUint16LE(bytes, height);
-    bytes.push(LOCAL_COLOR_TABLE_FLAG | LOCAL_COLOR_TABLE_SIZE_FIELD);
+/** Graphic Control Extension + Image Descriptor + Local Color Table + LZW image data for one frame. `width`/`height` are the shared canvas size (Image Descriptor's own dimensions), same for every frame in this codebase. */
+export function gifFrameBytes(width: number, height: number, frame: GifFrame): Uint8Array {
+  const bytes: number[] = [];
 
-    // Local Color Table (256 RGB triples).
-    appendBytes(bytes, frame.palette);
+  bytes.push(0x21, 0xf9, 0x04);
+  bytes.push(DISPOSAL_DO_NOT_DISPOSE);
+  appendUint16LE(bytes, frame.delayCs);
+  bytes.push(0x00); // transparent color index (unused)
+  bytes.push(0x00); // block terminator
 
-    // Image Data.
-    bytes.push(MIN_CODE_SIZE);
-    const compressed = lzwEncode(frame.indices, MIN_CODE_SIZE);
-    appendSubBlocks(bytes, compressed);
-  }
+  bytes.push(0x2c);
+  appendUint16LE(bytes, 0); // left
+  appendUint16LE(bytes, 0); // top
+  appendUint16LE(bytes, width);
+  appendUint16LE(bytes, height);
+  bytes.push(LOCAL_COLOR_TABLE_FLAG | LOCAL_COLOR_TABLE_SIZE_FIELD);
 
-  bytes.push(0x3b); // trailer
+  appendBytes(bytes, frame.palette);
+
+  bytes.push(MIN_CODE_SIZE);
+  const compressed = lzwEncode(frame.indices, MIN_CODE_SIZE);
+  appendSubBlocks(bytes, compressed);
 
   return Uint8Array.from(bytes);
+}
+
+/** Concatenates byte chunks into one contiguous array (avoids the call-stack risk of spreading large arrays). */
+export function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+/**
+ * Encodes `frames` as a GIF89a file. Each frame carries its own local color
+ * table (no global color table) since frames may be quantized against
+ * independent palettes. Thin synchronous wrapper over `gifHeader`/
+ * `gifFrameBytes`/`GIF_TRAILER` for callers that don't need the incremental,
+ * off-main-thread version those power (see `encodeWorker.ts`).
+ */
+export function encodeGif(width: number, height: number, frames: GifFrame[], loopCount = 0): Uint8Array {
+  const chunks = [gifHeader(width, height, loopCount)];
+  for (const frame of frames) chunks.push(gifFrameBytes(width, height, frame));
+  chunks.push(Uint8Array.of(GIF_TRAILER));
+  return concatBytes(chunks);
 }

@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
   import DropZone from './components/DropZone.svelte';
   import Timeline from './components/Timeline.svelte';
   import QualityPanel from './components/QualityPanel.svelte';
   import Preview from './components/Preview.svelte';
+  import SizeEstimate from './components/SizeEstimate.svelte';
+  import ExportBar from './components/ExportBar.svelte';
   import { demux, type DemuxResult } from './lib/demux';
   import { decodeAllFrames, nearestKeyframeAtOrBefore } from './lib/decode';
   import { createFrameSeeker, type FrameSeeker } from './lib/seek';
@@ -13,9 +15,11 @@
   import { computeHistogram } from './lib/histogram';
   import { medianCut } from './lib/palette';
   import { quantize, indicesToImageData } from './lib/quantize';
-  import { encodeGif, type GifFrame } from './lib/gif';
+  import { encodeGif } from './lib/gif';
+  import { EncodeWorkerClient } from './lib/encodeClient';
+  import { estimateGifSize, type SizeEstimateResult } from './lib/estimate';
   import { statusText, withBusy } from './lib/status';
-  import { quality, resetQualityForSource } from './lib/quality';
+  import { quality, resetQualityForSource, computeOutputDims } from './lib/quality';
 
   let fileName = '';
   let status = '';
@@ -46,6 +50,17 @@
   let exportStatus = '';
   let animExportStatus = '';
   let animExporting = false;
+  let animExportProgress: { current: number; total: number } | null = null;
+  let animExportError: string | null = null;
+  let animExportUrl: string | null = null;
+  let animExportBytes: number | null = null;
+  let exportAbort: AbortController | null = null;
+
+  let sizeEstimate: SizeEstimateResult | null = null;
+  let estimating = false;
+  let estimateAbort: AbortController | null = null;
+  let estimateDebounceHandle: ReturnType<typeof setTimeout> | null = null;
+  let estimateRunId = 0;
 
   let seeker: FrameSeeker | null = null;
   let playhead = 0;
@@ -75,6 +90,12 @@
     } catch (err) {
       gpuStatus = `WebGPU unavailable: ${(err as Error).message}`;
     }
+  });
+
+  onDestroy(() => {
+    exportAbort?.abort();
+    estimateAbort?.abort();
+    if (animExportUrl) URL.revokeObjectURL(animExportUrl);
   });
 
   function drawFrame(bitmap: ImageBitmap) {
@@ -108,8 +129,7 @@
     const srcTexture = sourceTexture;
     const { targetWidth, dither } = get(quality);
 
-    const width = Math.max(2, Math.round(targetWidth / 2) * 2);
-    const height = Math.max(2, Math.round((width * sourceHeight) / sourceWidth / 2) * 2);
+    const { width, height } = computeOutputDims(targetWidth, sourceWidth, sourceHeight);
     resizeStatus = `resizing to ${width}×${height}…`;
     paletteStatus = 'computing palette…';
 
@@ -200,6 +220,59 @@
     }, 100);
   });
 
+  /** Samples ~8 frames from the in/out range through the real pipeline + LZW
+   * (via a fresh, throwaway encode worker) and extrapolates a size estimate.
+   * Superseded runs are dropped via `estimateRunId` rather than raced. */
+  async function runSizeEstimate() {
+    if (!seeker || !sourceWidth || !sourceHeight) return;
+    const runId = ++estimateRunId;
+    estimateAbort?.abort();
+    const abort = new AbortController();
+    estimateAbort = abort;
+    estimating = true;
+    try {
+      const { device } = await gpuContext;
+      const result = await estimateGifSize({
+        device,
+        seeker,
+        sourceWidth,
+        sourceHeight,
+        inPoint,
+        outPoint,
+        avgFrameDurationUs: frameDurationUs,
+        quality: get(quality),
+        signal: abort.signal,
+      });
+      if (runId === estimateRunId && result) sizeEstimate = result;
+    } catch (err) {
+      // Best-effort UI sugar — a failed estimate shouldn't block export.
+      console.error('size estimate failed', err);
+    } finally {
+      if (runId === estimateRunId) estimating = false;
+    }
+  }
+
+  // Debounced re-estimate whenever quality settings or the in/out range
+  // change, mirroring the quality-pipeline debounce above. The scheduling
+  // itself lives in a plain function (not inlined in the `$:` block) since
+  // it both reads and writes `estimateDebounceHandle` — inlined, that read
+  // would make Svelte treat the block as depending on its own write and
+  // re-run it every tick instead of waiting out the debounce.
+  function scheduleEstimate() {
+    if (estimateDebounceHandle) clearTimeout(estimateDebounceHandle);
+    estimateDebounceHandle = setTimeout(() => {
+      estimateDebounceHandle = null;
+      runSizeEstimate();
+    }, 150);
+  }
+
+  $: if (seeker && sourceBitmap) {
+    void $quality;
+    void inPoint;
+    void outPoint;
+    scheduleEstimate();
+  }
+
   function downloadBlob(blob: Blob, filename: string) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -207,6 +280,20 @@
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function triggerDownload(url: string, filename: string) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+  }
+
+  function revokeAnimExportUrl() {
+    if (animExportUrl) {
+      URL.revokeObjectURL(animExportUrl);
+      animExportUrl = null;
+    }
   }
 
   function exportSingleFrameGif() {
@@ -223,7 +310,13 @@
   async function exportAnimatedGif() {
     if (!currentDemux || !seeker || animExporting) return;
     animExporting = true;
-    exportStatus = '';
+    animExportError = null;
+    animExportProgress = null;
+    revokeAnimExportUrl();
+    animExportBytes = null;
+    const abort = new AbortController();
+    exportAbort = abort;
+    const worker = new EncodeWorkerClient();
     const { track, chunks } = currentDemux;
     const from = inPoint;
     const to = outPoint;
@@ -308,43 +401,92 @@
         return bitmap;
       }
 
-      const gifFrames: GifFrame[] = [];
       let width = 0;
       let height = 0;
+      let started = false;
+      let cancelled = false;
       const delayCs = Math.max(1, Math.round(100 / outputFps / speed));
+      animExportProgress = { current: 0, total: tickIndices.length };
 
       for (let i = 0; i < tickIndices.length; i++) {
+        if (abort.signal.aborted) {
+          cancelled = true;
+          break;
+        }
         animExportStatus = `processing frame ${i + 1}/${tickIndices.length}…`;
         const bitmap = await getBitmapFor(tickIndices[i]);
 
         const srcWidth = bitmap.width;
         const srcHeight = bitmap.height;
-        width = Math.max(2, Math.round(targetWidth / 2) * 2);
-        height = Math.max(2, Math.round((width * srcHeight) / srcWidth / 2) * 2);
+        ({ width, height } = computeOutputDims(targetWidth, srcWidth, srcHeight));
+
+        if (!started) {
+          worker.start(width, height, loopCount);
+          started = true;
+        }
 
         const srcTexture = frameToTexture(device, bitmap);
         const { texture: resizedTexture } = resize(device, srcTexture, srcWidth, srcHeight, width, height);
         srcTexture.destroy();
+
+        if (abort.signal.aborted) {
+          resizedTexture.destroy();
+          cancelled = true;
+          break;
+        }
 
         const histogramCounts = await computeHistogram(device, resizedTexture, width, height);
         const framePalette = medianCut(histogramCounts);
         const indices32 = await quantize(device, resizedTexture, width, height, framePalette, dither);
         resizedTexture.destroy();
 
-        gifFrames.push({ indices: Uint8Array.from(indices32), palette: framePalette, delayCs });
+        if (abort.signal.aborted) {
+          cancelled = true;
+          break;
+        }
+
+        const ack = await worker.encodeFrame(Uint8Array.from(indices32), framePalette, delayCs);
+        animExportProgress = { current: ack.framesEncoded, total: tickIndices.length };
       }
 
       for (const bitmap of bitmapCache.values()) bitmap.close();
 
-      animExportStatus = 'encoding GIF…';
-      const gifBytes = encodeGif(width, height, gifFrames, loopCount);
-      downloadBlob(new Blob([new Uint8Array(gifBytes)], { type: 'image/gif' }), 'animation.gif');
-      animExportStatus = `exported ${gifFrames.length} frames, ${width}×${height} @ ${outputFps}fps — ${gifBytes.length.toLocaleString()} bytes`;
+      // On a normal run every used index passes through getBitmapFor (which
+      // closes its VideoFrame once consumed), so this is a no-op. On a
+      // cancelled run it isn't — indices past the break point were counted
+      // as "used" up front but never actually converted to a bitmap, so
+      // their VideoFrames would otherwise leak until GC.
+      for (const index of usedIndices) {
+        if (!bitmapCache.has(index)) framesInRange[index].close();
+      }
+
+      if (cancelled) {
+        animExportStatus = 'export cancelled';
+        return;
+      }
+
+      animExportStatus = 'finalizing GIF…';
+      const gifBytes = await worker.finish();
+      const blob = new Blob([gifBytes], { type: 'image/gif' });
+      animExportUrl = URL.createObjectURL(blob);
+      animExportBytes = gifBytes.length;
+      triggerDownload(animExportUrl, 'animation.gif');
+      animExportStatus = `exported ${tickIndices.length} frames, ${width}×${height} @ ${outputFps}fps — ${gifBytes.length.toLocaleString()} bytes`;
     } catch (err) {
-      animExportStatus = `export error: ${(err as Error).message}`;
+      if (!abort.signal.aborted) {
+        animExportError = (err as Error).message;
+        animExportStatus = `export error: ${(err as Error).message}`;
+      }
     } finally {
+      worker.terminate();
       animExporting = false;
+      animExportProgress = null;
+      exportAbort = null;
     }
+  }
+
+  function cancelAnimatedExport() {
+    exportAbort?.abort();
   }
 
   /** Decodes + renders `target`, updating the preview canvas + pipeline.
@@ -417,6 +559,10 @@
     status = 'demuxing…';
     resizeStatus = '';
 
+    exportAbort?.abort();
+    estimateAbort?.abort();
+    revokeAnimExportUrl();
+
     sourceTexture?.destroy();
     sourceTexture = null;
     resizedTexture?.destroy();
@@ -435,6 +581,9 @@
     currentDemux = null;
     exportStatus = '';
     animExportStatus = '';
+    animExportError = null;
+    animExportBytes = null;
+    sizeEstimate = null;
     playhead = 0;
     inPoint = 0;
     outPoint = 0;
@@ -533,16 +682,23 @@
     <h2 class="ab-heading">Export</h2>
     <div class="export-row">
       <button on:click={exportSingleFrameGif} disabled={!quantizedIndices}>Export current frame as GIF</button>
-      <button on:click={exportAnimatedGif} disabled={animExporting || !currentDemux}>
-        {animExporting ? 'Exporting…' : `Export animated GIF (frames ${inPoint + 1}–${outPoint + 1})`}
-      </button>
     </div>
     {#if exportStatus}
       <p class="status">{exportStatus}</p>
     {/if}
-    {#if animExportStatus}
-      <p class="status">{animExportStatus}</p>
-    {/if}
+
+    <SizeEstimate estimate={sizeEstimate} {estimating} />
+    <ExportBar
+      exporting={animExporting}
+      disabled={!currentDemux}
+      progress={animExportProgress}
+      statusText={animExportStatus}
+      error={animExportError}
+      downloadUrl={animExportUrl}
+      downloadBytes={animExportBytes}
+      on:encode={exportAnimatedGif}
+      on:cancel={cancelAnimatedExport}
+    />
   {/if}
 </main>
 

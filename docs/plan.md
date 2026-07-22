@@ -129,7 +129,9 @@ completed; future sessions start by reading this file to find the frontier.
   called before its `width`/`height` were read for the resize call,
   which zeroes an ImageBitmap's dimensions and collapsed every frame to
   the same degenerate 0×0 resize).
-- [ ] Move LZW + GIF assembly into an encode Web Worker
+- [x] Move LZW + GIF assembly into an encode Web Worker — done in Phase 10
+  once export needed real progress reporting + cancellation (see Phase 10's
+  notes for the worker design)
 
 ## Phase 8 — Timeline UI
 > Done when: user can scrub through a video frame-by-frame, set in/out
@@ -244,23 +246,87 @@ console errors, no GPU validation warnings.
 > Done when: a size estimate displays before encoding and updates live
 > with quality changes. Export shows progress and produces a correct GIF.
 
-- [ ] `lib/estimate.ts`:
+- [x] `lib/estimate.ts`:
   - Pick ~8 evenly-spaced frames from in/out range
   - Run full pipeline + LZW on each (reuse encode worker)
   - Average bytes/frame × total frames + header overhead
   - Re-estimate on quality/timeline change (debounced)
-- [ ] `SizeEstimate.svelte` — display estimated size (KB/MB), frame
-  count, output dimensions, output duration
-- [ ] `ExportBar.svelte`:
+  - Frame sampling uses `seeker.seekTo(index)` (cache-aware, per-frame)
+    rather than a bulk `decodeAllFrames` over the whole range — cheaper for
+    long clips where only ~8 of possibly hundreds of frames are needed.
+    Total output frame count is approximated from `rangeFrameCount ×
+    avgFrameDurationUs` (the mean chunk duration already tracked in
+    `App.svelte`) rather than the exact cumulative-duration timeline
+    `exportAnimatedGif` builds — good enough for an estimate, and avoids
+    decoding the full range just to measure its duration.
+  - Each estimate run gets its own throwaway `EncodeWorkerClient` (spun up
+    and terminated per call) rather than sharing the real export's worker
+    instance — avoids interleaving two logical encodes' state if a
+    debounced re-estimate and a real export ever overlap.
+- [x] `SizeEstimate.svelte` — display estimated size (KB/MB), frame
+  count, output dimensions, output duration. Also surfaces the >500-frame
+  warning (see edge cases below).
+- [x] `ExportBar.svelte`:
   - Encode button (disabled during encode)
   - Progress bar (% of frames processed)
   - Cancel button (abort encode, clean up)
-  - Download link appears on completion
-- [ ] Encode pipeline: sequential decode through in/out → GPU pipeline →
+  - Download link appears on completion (object URL held open — not
+    revoked immediately like the single-frame export's — so the link
+    stays clickable after the auto-triggered download)
+- [x] Encode pipeline: sequential decode through in/out → GPU pipeline →
   post indices + palette to encode worker → worker streams GIF bytes
-  into a Blob → trigger download
-- [ ] Handle edge cases: zero-length selection, single frame, very long
-  clips (>500 frames warning?)
+  into a Blob → trigger download. Built the encode Web Worker this phase
+  (Phase 7's deferred item) rather than main-thread yielding — a
+  deliberate choice, confirmed with the user first, since a real
+  responsive progress bar + cancel needed the LZW/GIF-assembly work off
+  the main thread. `lib/gif.ts` was split into `gifHeader`/`gifFrameBytes`/
+  `concatBytes` (composed by `encodeGif` for the still-synchronous
+  single-frame export path) so the worker could drive the same
+  frame-by-frame assembly incrementally. `lib/encodeProtocol.ts` defines
+  the message types; `lib/encodeClient.ts` wraps a worker instance in a
+  sequential request/response API (`start`/`encodeFrame`/`finish`) so
+  neither `App.svelte` nor `estimate.ts` deal with raw `postMessage`.
+  `indices`/`palette` are transferred (not cloned) per frame — both are
+  always freshly-allocated, byte-offset-0 typed arrays by construction, so
+  transfer is safe zero-copy.
+- [x] Handle edge cases: zero-length selection (in/out clamped so this
+  can't actually happen — `handleSetIn`/`handleSetOut` keep in ≤ out), a
+  true single-frame selection (in === out, produces a 1-frame GIF — no
+  special-casing needed, `outputFrameCount` already floors to 1), very
+  long clips (`SizeEstimate` shows a warning above 500 output frames,
+  matching the checklist's own threshold).
+- [x] Cancellation: `AbortController` per export run, checked between
+  pipeline stages each frame iteration (mirrors the per-iteration
+  `resizedTexture.destroy()`/`srcTexture.destroy()` pattern already in
+  the export loop — any GPU texture created before the cancel point is
+  destroyed, never leaked). Found and fixed a real leak surfaced by
+  Playwright's console-error watching: cancelling mid-export left
+  not-yet-processed `VideoFrame`s (indices past the break point that
+  were pre-counted as "used" but never converted to a bitmap) unclosed —
+  `"A VideoFrame was garbage collected without being closed"` in the
+  console. Fixed with a post-loop sweep that closes any used index not
+  already in the bitmap cache — a no-op on a completed run (everything
+  used already went through `getBitmapFor`), real cleanup on a cancelled
+  one.
+
+Verified with Playwright (chromium, real Chrome channel) against a new
+long synthetic clip (`mandelbrot`, 480×270 @ 24fps, 35s, ~840 frames) plus
+the existing `bars.mp4`/`multikey.mp4`: size estimate appears and changes
+with a resolution-preset change, animated export via the worker produces
+a byte-valid GIF89a (header/dimensions/GCE-count/loop-count/trailer
+checked directly, `nb_frames` cross-checked with ffprobe against the
+output frame count), the >500-frame warning shows on the long clip,
+progress bar advances during encode (confirmed over a multi-second
+window — this dev environment's headless Chrome falls back to
+SwiftShader software rendering, much slower than real hardware, so the
+window was widened accordingly), cancel mid-export leaves no stale
+download link and returns cleanly to Idle, and a true single-frame (in
+=== out) selection exports successfully through the same worker path.
+Also re-ran the full `npm run check` (0 errors) and `npm run build` +
+`vite preview` smoke test (worker bundles as its own chunk in
+production, export completes with zero console errors) since Vite's
+dev-server vs. production worker bundling is a known place for behavior
+to diverge.
 
 ## Phase 11 — Integration + polish
 > Done when: the tool is end-to-end usable. Drop a video, trim, adjust

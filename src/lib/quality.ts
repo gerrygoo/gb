@@ -25,6 +25,13 @@ const DEFAULT_QUALITY: QualitySettings = {
 
 export const quality = writable<QualitySettings>({ ...DEFAULT_QUALITY });
 
+/** Output width/height for a target width, aspect-locked to the source and rounded to even (both dimensions). */
+export function computeOutputDims(targetWidth: number, sourceWidth: number, sourceHeight: number): { width: number; height: number } {
+  const width = Math.max(2, Math.round(targetWidth / 2) * 2);
+  const height = Math.max(2, Math.round((width * sourceHeight) / sourceWidth / 2) * 2);
+  return { width, height };
+}
+
 /** Width for a given conventional preset height, aspect-locked to the source and rounded to even. */
 export function presetWidthFor(presetHeight: number, sourceWidth: number, sourceHeight: number): number {
   if (!sourceWidth || !sourceHeight) return presetHeight;
