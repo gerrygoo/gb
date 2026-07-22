@@ -13,44 +13,40 @@ Unscoped ideas beyond what's below live in `docs/future-ideas.md`.
 > palette, switch dither between blue-noise/Bayer/none, and toggle
 > sRGB-vs-linear quantization — all reflected live in preview and export.
 
-- [ ] Palette size control (q4): `QualityPanel.svelte` slider/number input,
-  2–256 (default 256). `palette.ts`'s median-cut already recurses to a
-  target count — confirm it takes `N` as a parameter rather than
-  hardcoding 256 splits; if not, generalize it. `quantize.wgsl` currently
-  loops a fixed 256-entry palette for nearest-match brute force — needs
-  the count passed as a uniform and the loop bound made dynamic.
-- [ ] Global palette (q5): new toggle alongside the existing per-frame
-  behavior. Accumulate a histogram across several sampled frames from the
-  in/out range (reuse `estimate.ts`'s ~8-frame sampling strategy) instead
-  of per-frame, produce one palette, reuse it for every frame's quantize
-  pass. GIF side: write a single global color table in the logical screen
-  descriptor instead of a local color table per frame (`gif.ts` already
-  supports both per the GIF89a spec — confirm/wire the global-table path
-  through `gifHeader`/`gifFrameBytes`). Tradeoff worth surfacing in the UI:
-  better temporal coherence (less flicker), possible banding across scene
-  changes — no special-casing needed for scene detection, just document
-  the tradeoff.
-- [ ] Bayer dither (q6): add an 8×8 ordered Bayer matrix as a second dither
-  option alongside blue-noise. `quantize.wgsl`'s dither param moves from a
-  bool to an enum (`none` / `blue-noise` / `bayer`); bake the Bayer matrix
-  the same way `blueNoise.ts` bakes its texture. `QualityPanel.svelte`'s
-  toggle becomes a 3-way choice.
-- [ ] Color space toggle (q7): option to do the quantize-stage nearest-color
-  distance calculation in linear light instead of sRGB. Needs an
-  sRGB→linear conversion in `quantize.wgsl` before distance comparison
-  (and likely in `histogram.wgsl` too, so the palette itself is built in
-  the same space it's matched in — otherwise the two stages disagree on
-  what "nearest" means). Verify visually: linear-space quantization should
-  reduce banding in dark gradients specifically (that's the classic
-  sRGB-quantization artifact) — a synthetic dark-gradient test clip is
-  worth adding if one doesn't already exist.
-- [ ] Transparency (q8): alpha threshold control. Caveat to confirm before
-  building: current input path is video-only (WebCodecs `VideoFrame`s),
-  which are opaque — there's no alpha channel to threshold unless/until an
-  alpha-carrying source exists (e.g., VP9 with alpha, or the deferred
-  image-sequence input). Worth checking with the user whether to build the
-  UI/pipeline plumbing now against a synthetic alpha test source, or defer
-  this item until an alpha-bearing input path actually exists.
+- [x] Palette size control (q4): `QualityPanel.svelte` slider, 2–256
+  (default 256). `medianCut()` and `quantize()` take the count as a
+  parameter; `quantize.wgsl`'s palette loop bound is now a `colorCount`
+  uniform instead of a hardcoded 256. `gif.ts` generalized to write
+  power-of-two color tables sized to whatever count the palette actually
+  has (padding unused slots with black) and derives the LZW min code size
+  from that, instead of assuming 256 throughout.
+- [x] Global palette (q5): `QualityPanel.svelte` "Palette scope"
+  toggle (Per-frame/Global). `src/lib/globalPalette.ts` accumulates a
+  histogram across ~8 samples from the in/out range (sampling logic
+  extracted to `src/lib/sampling.ts`, shared with `estimate.ts`) and runs
+  one `medianCut`; export and preview reuse that palette instead of
+  computing one per frame. `gif.ts`'s `gifHeader`/`gifFrameBytes` now
+  support a shared global color table (frames omit their local table when
+  one is in use); threaded through `encodeProtocol.ts`/`encodeWorker.ts`/
+  `encodeClient.ts`.
+- [x] Bayer dither (q6): `quantize.wgsl`'s dither param is now a 3-way
+  enum (`none` / `blue-noise` / `bayer`, `DitherMode` in `quantize.ts`);
+  the 8×8 Bayer matrix is a `const` array baked directly into the shader
+  (no texture upload needed, unlike blue-noise). `QualityPanel.svelte`'s
+  toggle is now a 3-way button group.
+- [x] Color space toggle (q7): `QualityPanel.svelte` sRGB/Linear toggle.
+  Both `histogram.wgsl` (bucketing) and `quantize.wgsl` (nearest-match
+  distance) convert sRGB→linear before their math when linear mode is
+  active, so the two stages agree on "nearest"; `palette.ts`'s
+  `medianCut` converts averaged bucket centers back to sRGB bytes before
+  returning, so the palette format leaving that function is always sRGB
+  regardless of working color space. Not yet verified against a
+  synthetic dark-gradient clip for the expected reduced-banding effect —
+  worth doing before calling q7 fully validated visually.
+- [ ] Transparency (q8): deferred — current input path is video-only
+  (WebCodecs `VideoFrame`s), which are opaque, so there's no alpha
+  channel to threshold against yet. Revisit once an alpha-bearing input
+  path exists (e.g. the deferred image-sequence input).
 
 ## Phase 13 — Performance: profiling + pipeline overlap
 > Done when: pipeline-stage timings are measured on real GPU hardware (not

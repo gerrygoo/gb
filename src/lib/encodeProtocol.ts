@@ -8,6 +8,8 @@ export interface EncodeStartMessage {
   width: number;
   height: number;
   loopCount: number;
+  /** Present only when encoding with a shared global color table (q5) instead of per-frame local tables. */
+  globalPalette?: ArrayBuffer;
 }
 
 export interface EncodeFrameMessage {

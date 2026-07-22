@@ -14,7 +14,8 @@
   import { frameToTexture, resize, textureToImageData } from './lib/resize';
   import { computeHistogram } from './lib/histogram';
   import { medianCut } from './lib/palette';
-  import { quantize, indicesToImageData } from './lib/quantize';
+  import { quantize, indicesToImageData, type DitherMode } from './lib/quantize';
+  import { computeGlobalPalette } from './lib/globalPalette';
   import { encodeGif } from './lib/gif';
   import { EncodeWorkerClient } from './lib/encodeClient';
   import { estimateGifSize, type SizeEstimateResult } from './lib/estimate';
@@ -118,15 +119,19 @@
     ctx?.drawImage(bitmap, 0, 0);
   }
 
+  const DITHER_LABELS: Record<DitherMode, string> = { none: 'no dither', 'blue-noise': 'blue-noise dither', bayer: 'bayer dither' };
+
   function drawPalette(pal: Uint8Array) {
+    const colorCount = pal.length / 3;
     const swatchSize = 16;
     const cols = 16;
-    const rows = 16;
+    const rows = Math.ceil(colorCount / cols);
     paletteCanvas.width = cols * swatchSize;
     paletteCanvas.height = rows * swatchSize;
     const ctx = paletteCanvas.getContext('2d');
     if (!ctx) return;
-    for (let i = 0; i < 256; i++) {
+    ctx.clearRect(0, 0, paletteCanvas.width, paletteCanvas.height);
+    for (let i = 0; i < colorCount; i++) {
       const x = (i % cols) * swatchSize;
       const y = Math.floor(i / cols) * swatchSize;
       ctx.fillStyle = `rgb(${pal[i * 3]}, ${pal[i * 3 + 1]}, ${pal[i * 3 + 2]})`;
@@ -137,10 +142,11 @@
   /** Runs resize → histogram → palette → quantize on the current playhead frame at the
    * current quality settings. Generalizes what used to be a preset-height-only `runResize`. */
   async function runQualityPipeline() {
-    if (!sourceBitmap || !sourceTexture) return;
+    if (!sourceBitmap || !sourceTexture || !seeker) return;
     const bitmap = sourceBitmap;
     const srcTexture = sourceTexture;
-    const { targetWidth, dither } = get(quality);
+    const activeSeeker = seeker;
+    const { targetWidth, dither, paletteSize, globalPalette, colorSpace } = get(quality);
 
     const { width, height } = computeOutputDims(targetWidth, sourceWidth, sourceHeight);
     resizeStatus = `resizing to ${width}×${height}…`;
@@ -168,21 +174,36 @@
 
         resizeStatus = `${width}×${height} — GPU Lanczos-3 vs. browser drawImage`;
 
-        const histogramCounts = await computeHistogram(device, texture, width, height);
-        palette = medianCut(histogramCounts);
-        drawPalette(palette);
-        const populatedBins = histogramCounts.filter((count) => count > 0).length;
-        paletteStatus = `256-color palette · median-cut over ${populatedBins} populated histogram bins`;
+        if (globalPalette) {
+          palette = await computeGlobalPalette({
+            device,
+            seeker: activeSeeker,
+            inPoint,
+            outPoint,
+            outputWidth: width,
+            outputHeight: height,
+            paletteSize,
+            colorSpace,
+          });
+          drawPalette(palette);
+          paletteStatus = `${paletteSize}-color global palette · median-cut over samples from the in/out range`;
+        } else {
+          const histogramCounts = await computeHistogram(device, texture, width, height, colorSpace);
+          palette = medianCut(histogramCounts, paletteSize, colorSpace);
+          drawPalette(palette);
+          const populatedBins = histogramCounts.filter((count) => count > 0).length;
+          paletteStatus = `${paletteSize}-color palette · median-cut over ${populatedBins} populated histogram bins`;
+        }
 
         quantizeStatus = 'quantizing + dithering…';
-        const indices = await quantize(device, texture, width, height, palette, dither);
+        const indices = await quantize(device, texture, width, height, palette, { ditherMode: dither, colorSpace });
         quantizedIndices = indices;
         const quantizedImageData = indicesToImageData(indices, palette, width, height);
         previewWidth = width;
         previewHeight = height;
         previewSourceImageData = imageData;
         previewQuantizedImageData = quantizedImageData;
-        quantizeStatus = `${width}×${height} · 256 colors · ${dither ? 'blue-noise dither' : 'no dither'}`;
+        quantizeStatus = `${width}×${height} · ${paletteSize} colors · ${DITHER_LABELS[dither]} · ${colorSpace}`;
       } catch (err) {
         resizeStatus = `resize error: ${(err as Error).message}`;
         paletteStatus = '';
@@ -343,7 +364,34 @@
     try {
       animExportStatus = `preparing export (in/out ${from + 1}–${to + 1})…`;
       const { device } = await gpuContext;
-      const { targetWidth, fps: outputFps, dither, loopCount, speed } = get(quality);
+      const { targetWidth, fps: outputFps, paletteSize, globalPalette, dither, colorSpace, loopCount, speed } = get(quality);
+
+      // Source dimensions are already known (unlike per-frame decode
+      // metadata), so output dims can be computed once up front rather than
+      // on the first decoded tick — needed anyway to build the global
+      // palette (q5) before any frame is quantized against it.
+      const { width, height } = computeOutputDims(targetWidth, sourceWidth, sourceHeight);
+
+      let sharedPalette: Uint8Array | null = null;
+      if (globalPalette) {
+        animExportStatus = 'sampling frames for global palette…';
+        sharedPalette = await computeGlobalPalette({
+          device,
+          seeker,
+          inPoint: from,
+          outPoint: to,
+          outputWidth: width,
+          outputHeight: height,
+          paletteSize,
+          colorSpace,
+          signal: abort.signal,
+        });
+        if (abort.signal.aborted) {
+          animExportStatus = 'export cancelled';
+          return;
+        }
+      }
+      worker.start(width, height, loopCount, sharedPalette ? Uint8Array.from(sharedPalette) : undefined);
 
       // Build the output timeline from the encoded chunks' own `duration` —
       // this only needs demuxed chunk metadata, not decoded frames, so the
@@ -390,28 +438,17 @@
         tickIndices.push(nearestSourceIndex(k * outputIntervalUs));
       }
 
-      let width = 0;
-      let height = 0;
-      let started = false;
       let cancelled = false;
       const delayCs = Math.max(1, Math.round(100 / outputFps / speed));
       animExportProgress = { current: 0, total: tickIndices.length };
 
-      /** Runs resize → histogram → palette → quantize → encode for one
-       * output tick against an already-decoded bitmap. Returns false if the
-       * export was cancelled mid-stage. */
+      /** Runs resize → (histogram → palette, unless a global one was
+       * precomputed) → quantize → encode for one output tick against an
+       * already-decoded bitmap. Returns false if the export was cancelled
+       * mid-stage. */
       async function processTick(bitmap: ImageBitmap): Promise<boolean> {
-        const srcWidth = bitmap.width;
-        const srcHeight = bitmap.height;
-        ({ width, height } = computeOutputDims(targetWidth, srcWidth, srcHeight));
-
-        if (!started) {
-          worker.start(width, height, loopCount);
-          started = true;
-        }
-
         const srcTexture = frameToTexture(device, bitmap);
-        const { texture: resizedTexture } = resize(device, srcTexture, srcWidth, srcHeight, width, height);
+        const { texture: resizedTexture } = resize(device, srcTexture, bitmap.width, bitmap.height, width, height);
         srcTexture.destroy();
 
         if (abort.signal.aborted) {
@@ -419,14 +456,19 @@
           return false;
         }
 
-        const histogramCounts = await computeHistogram(device, resizedTexture, width, height);
-        const framePalette = medianCut(histogramCounts);
-        const indices32 = await quantize(device, resizedTexture, width, height, framePalette, dither);
+        let framePalette = sharedPalette;
+        if (!framePalette) {
+          const histogramCounts = await computeHistogram(device, resizedTexture, width, height, colorSpace);
+          framePalette = medianCut(histogramCounts, paletteSize, colorSpace);
+        }
+        const indices32 = await quantize(device, resizedTexture, width, height, framePalette, { ditherMode: dither, colorSpace });
         resizedTexture.destroy();
 
         if (abort.signal.aborted) return false;
 
-        const ack = await worker.encodeFrame(Uint8Array.from(indices32), framePalette, delayCs);
+        // `framePalette` may be `sharedPalette`, reused for every tick —
+        // copy before `encodeFrame`, which transfers (detaches) the buffer.
+        const ack = await worker.encodeFrame(Uint8Array.from(indices32), Uint8Array.from(framePalette), delayCs);
         animExportProgress = { current: ack.framesEncoded, total: tickIndices.length };
         return true;
       }

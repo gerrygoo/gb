@@ -1,14 +1,25 @@
 import { writable } from 'svelte/store';
+import type { DitherMode } from './quantize';
+import type { ColorSpace } from './palette';
+import { PALETTE_SIZE as MAX_PALETTE_SIZE, MIN_PALETTE_SIZE } from './palette';
 
 /** Conventional height values for the resolution preset buttons. */
 export const RESOLUTION_PRESETS = [480, 320, 240, 160] as const;
+
+export { MAX_PALETTE_SIZE, MIN_PALETTE_SIZE };
 
 export interface QualitySettings {
   /** Output width in pixels (even). Height is derived from source aspect ratio. */
   targetWidth: number;
   /** Output frame rate, 1–60. */
   fps: number;
-  dither: boolean;
+  /** Colors in the generated palette, 2–256 (q4). */
+  paletteSize: number;
+  /** When true, one palette is built from samples across the whole in/out range and shared by every frame (q5); when false (default), each frame gets its own palette. */
+  globalPalette: boolean;
+  dither: DitherMode;
+  /** Color space the palette/quantize nearest-match distance is computed in (q7). */
+  colorSpace: ColorSpace;
   /** 0 = infinite, per the Netscape looping extension. */
   loopCount: number;
   /** Playback speed multiplier, 0.25–4. Scales export frame delay. */
@@ -18,7 +29,10 @@ export interface QualitySettings {
 const DEFAULT_QUALITY: QualitySettings = {
   targetWidth: 640,
   fps: 30,
-  dither: true,
+  paletteSize: MAX_PALETTE_SIZE,
+  globalPalette: false,
+  dither: 'blue-noise',
+  colorSpace: 'srgb',
   loopCount: 0,
   speed: 1,
 };

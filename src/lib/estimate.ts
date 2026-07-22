@@ -7,6 +7,8 @@ import { medianCut } from './palette';
 import { quantize } from './quantize';
 import { gifHeader } from './gif';
 import { EncodeWorkerClient } from './encodeClient';
+import { sampleIndicesForRange, MAX_RANGE_SAMPLES } from './sampling';
+import { computeGlobalPalette } from './globalPalette';
 
 export interface SizeEstimateResult {
   estimatedBytes: number;
@@ -15,8 +17,6 @@ export interface SizeEstimateResult {
   outputHeight: number;
   outputDurationSec: number;
 }
-
-const MAX_SAMPLES = 8;
 
 export interface EstimateParams {
   device: GPUDevice;
@@ -46,21 +46,20 @@ export async function estimateGifSize(params: EstimateParams): Promise<SizeEstim
     return { estimatedBytes: 0, frameCount: 0, outputWidth: 0, outputHeight: 0, outputDurationSec: 0 };
   }
 
-  const { targetWidth, fps, dither, loopCount, speed } = quality;
+  const { targetWidth, fps, paletteSize, globalPalette, dither, colorSpace, loopCount, speed } = quality;
   const totalDurationUs = rangeFrameCount * avgFrameDurationUs;
   const outputIntervalUs = 1_000_000 / fps;
   const outputFrameCount = Math.max(1, Math.round(totalDurationUs / outputIntervalUs) || 1);
   const delayCs = Math.max(1, Math.round(100 / fps / speed));
 
-  const sampleCount = Math.min(MAX_SAMPLES, rangeFrameCount);
-  const sampleIndices: number[] = [];
-  for (let i = 0; i < sampleCount; i++) {
-    const index =
-      sampleCount === 1 ? inPoint : Math.round(inPoint + (i * (rangeFrameCount - 1)) / (sampleCount - 1));
-    sampleIndices.push(index);
-  }
-
+  const sampleIndices = sampleIndicesForRange(inPoint, outPoint, MAX_RANGE_SAMPLES);
   const { width, height } = computeOutputDims(targetWidth, sourceWidth, sourceHeight);
+
+  const sharedPalette = globalPalette
+    ? await computeGlobalPalette({ device, seeker, inPoint, outPoint, outputWidth: width, outputHeight: height, paletteSize, colorSpace, signal })
+    : null;
+  if (signal?.aborted) return null;
+
   const worker = new EncodeWorkerClient();
   try {
     let totalBytes = 0;
@@ -74,21 +73,27 @@ export async function estimateGifSize(params: EstimateParams): Promise<SizeEstim
       const { texture: resizedTexture } = resize(device, srcTexture, bitmap.width, bitmap.height, width, height);
       srcTexture.destroy();
 
-      const histogramCounts = await computeHistogram(device, resizedTexture, width, height);
-      const palette = medianCut(histogramCounts);
-      const indices32 = await quantize(device, resizedTexture, width, height, palette, dither);
+      let palette = sharedPalette;
+      if (!palette) {
+        const histogramCounts = await computeHistogram(device, resizedTexture, width, height, colorSpace);
+        palette = medianCut(histogramCounts, paletteSize, colorSpace);
+      }
+      const indices32 = await quantize(device, resizedTexture, width, height, palette, { ditherMode: dither, colorSpace });
       resizedTexture.destroy();
 
       if (signal?.aborted) return null;
 
+      // `palette` may be `sharedPalette`, reused across every sample — copy
+      // before handing it to `encodeFrame`, which transfers (and thus
+      // detaches) the buffer it's given.
       const indices8 = Uint8Array.from(indices32);
-      const ack = await worker.encodeFrame(indices8, palette, delayCs);
+      const ack = await worker.encodeFrame(indices8, Uint8Array.from(palette), delayCs);
       totalBytes += ack.bytesForFrame;
       samplesEncoded++;
     }
 
     const avgBytesPerFrame = samplesEncoded > 0 ? totalBytes / samplesEncoded : 0;
-    const overheadBytes = gifHeader(width, height, loopCount).length + 1; // +1 for GIF_TRAILER
+    const overheadBytes = gifHeader(width, height, loopCount, sharedPalette ?? undefined).length + 1; // +1 for GIF_TRAILER
     const estimatedBytes = Math.round(overheadBytes + avgBytesPerFrame * outputFrameCount);
     const outputDurationSec = (outputFrameCount * delayCs) / 100;
 

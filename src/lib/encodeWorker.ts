@@ -14,6 +14,7 @@ let chunks: Uint8Array[] = [];
 let frameWidth = 0;
 let frameHeight = 0;
 let framesEncoded = 0;
+let useGlobalColorTable = false;
 
 function post(message: EncodeOutMessage, transfer: Transferable[] = []): void {
   worker.postMessage(message, transfer);
@@ -26,7 +27,9 @@ worker.onmessage = (e: MessageEvent<EncodeInMessage>) => {
       case 'start': {
         frameWidth = msg.width;
         frameHeight = msg.height;
-        chunks = [gifHeader(msg.width, msg.height, msg.loopCount)];
+        useGlobalColorTable = !!msg.globalPalette;
+        const globalPalette = msg.globalPalette ? new Uint8Array(msg.globalPalette) : undefined;
+        chunks = [gifHeader(msg.width, msg.height, msg.loopCount, globalPalette)];
         framesEncoded = 0;
         break;
       }
@@ -36,7 +39,7 @@ worker.onmessage = (e: MessageEvent<EncodeInMessage>) => {
           palette: new Uint8Array(msg.palette),
           delayCs: msg.delayCs,
         };
-        const frameBytes = gifFrameBytes(frameWidth, frameHeight, frame);
+        const frameBytes = gifFrameBytes(frameWidth, frameHeight, frame, useGlobalColorTable);
         chunks.push(frameBytes);
         framesEncoded++;
         post({ type: 'progress', framesEncoded, bytesForFrame: frameBytes.length });

@@ -30,8 +30,16 @@ export class EncodeWorkerClient {
     pending?.reject(err);
   }
 
-  start(width: number, height: number, loopCount: number): void {
-    this.worker.postMessage({ type: 'start', width, height, loopCount });
+  /** `globalPalette` (q5), if given, is transferred — pass a fresh, fully-owned array (see file header note). */
+  start(width: number, height: number, loopCount: number, globalPalette?: Uint8Array): void {
+    if (globalPalette) {
+      this.worker.postMessage(
+        { type: 'start', width, height, loopCount, globalPalette: globalPalette.buffer },
+        [globalPalette.buffer],
+      );
+    } else {
+      this.worker.postMessage({ type: 'start', width, height, loopCount });
+    }
   }
 
   /** Encodes one frame; resolves once the worker has appended it, with a running frame count and this frame's compressed byte size. */

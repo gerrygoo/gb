@@ -1,6 +1,19 @@
 import { BINS_PER_CHANNEL } from './histogram';
 
 export const PALETTE_SIZE = 256;
+export const MIN_PALETTE_SIZE = 2;
+
+export type ColorSpace = 'srgb' | 'linear';
+
+/** Converts a gamma-encoded sRGB 0–1 channel value to linear light. Exported for quantize.ts, which pre-converts the (always-sRGB-bytes) palette to linear once at upload time rather than per-pixel in the shader (q7). */
+export function srgbToLinear(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+/** Converts a linear-light 0–1 channel value back to gamma-encoded sRGB. Used to reconstruct display/GIF-storable palette bytes when the histogram/quantize working space is linear (q7) — bucket centers and averages are computed in that working space, but the returned palette is always sRGB bytes regardless. */
+function linearToSrgb(c: number): number {
+  return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+}
 
 interface Bin {
   r: number;
@@ -44,7 +57,7 @@ function boxFromBins(bins: Bin[]): Box {
   return { bins, count, rMin, rMax, gMin, gMax, bMin, bMax };
 }
 
-function averageColor(box: Box): [number, number, number] {
+function averageColor(box: Box, colorSpace: ColorSpace): [number, number, number] {
   let r = 0;
   let g = 0;
   let b = 0;
@@ -54,7 +67,15 @@ function averageColor(box: Box): [number, number, number] {
     b += bucketCenter(bin.b) * bin.count;
   }
   const count = Math.max(box.count, 1);
-  return [Math.round((r / count) * 255), Math.round((g / count) * 255), Math.round((b / count) * 255)];
+  let rAvg = r / count;
+  let gAvg = g / count;
+  let bAvg = b / count;
+  if (colorSpace === 'linear') {
+    rAvg = linearToSrgb(rAvg);
+    gAvg = linearToSrgb(gAvg);
+    bAvg = linearToSrgb(bAvg);
+  }
+  return [Math.round(rAvg * 255), Math.round(gAvg * 255), Math.round(bAvg * 255)];
 }
 
 /** Splits `box` along its longest axis at the weighted median. Returns null if the box can't be split further (single populated bin). */
@@ -95,8 +116,16 @@ function splitBox(box: Box): [Box, Box] | null {
   return [boxFromBins(sorted.slice(0, splitIdx)), boxFromBins(sorted.slice(splitIdx))];
 }
 
-/** Median-cut quantization over a 32×32×32 histogram. Input: bin counts indexed r*32*32 + g*32 + b (see histogram.wgsl). Output: 256 RGB colors. */
-export function medianCut(histogram: Uint32Array): Uint8Array {
+/**
+ * Median-cut quantization over a 32×32×32 histogram. Input: bin counts
+ * indexed r*32*32 + g*32 + b (see histogram.wgsl), built in `colorSpace`
+ * (must match the space `quantize()` will match against — see q7).
+ * Output: `paletteSize` RGB colors (clamped to [2, 256]), always as sRGB
+ * bytes regardless of the working color space.
+ */
+export function medianCut(histogram: Uint32Array, paletteSize = PALETTE_SIZE, colorSpace: ColorSpace = 'srgb'): Uint8Array {
+  const targetSize = Math.max(MIN_PALETTE_SIZE, Math.min(PALETTE_SIZE, Math.round(paletteSize)));
+
   const bins: Bin[] = [];
   for (let r = 0; r < BINS_PER_CHANNEL; r++) {
     for (let g = 0; g < BINS_PER_CHANNEL; g++) {
@@ -110,14 +139,14 @@ export function medianCut(histogram: Uint32Array): Uint8Array {
     }
   }
 
-  const palette = new Uint8Array(PALETTE_SIZE * 3);
+  const palette = new Uint8Array(targetSize * 3);
   if (bins.length === 0) {
     return palette;
   }
 
   const boxes: Box[] = [boxFromBins(bins)];
 
-  while (boxes.length < PALETTE_SIZE) {
+  while (boxes.length < targetSize) {
     boxes.sort((a, b) => b.count - a.count);
 
     let splitIndex = -1;
@@ -130,19 +159,19 @@ export function medianCut(histogram: Uint32Array): Uint8Array {
       }
     }
     if (!result) {
-      break; // no splittable box left — fewer than 256 distinct colors
+      break; // no splittable box left — fewer than targetSize distinct colors
     }
     boxes.splice(splitIndex, 1, result[0], result[1]);
   }
 
-  // If median-cut stops early (fewer than 256 distinct colors in the
+  // If median-cut stops early (fewer than targetSize distinct colors in the
   // source), cycle through the real boxes to fill the remaining slots
   // instead of repeating just the last one — keeps the palette (and its
   // swatch preview) representative of the actual color spread rather than
   // collapsing into one big duplicate block.
-  for (let i = 0; i < PALETTE_SIZE; i++) {
+  for (let i = 0; i < targetSize; i++) {
     const box = boxes[i % boxes.length];
-    const [r, g, b] = averageColor(box);
+    const [r, g, b] = averageColor(box, colorSpace);
     palette[i * 3] = r;
     palette[i * 3 + 1] = g;
     palette[i * 3 + 2] = b;

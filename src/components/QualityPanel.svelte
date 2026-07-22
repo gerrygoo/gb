@@ -1,8 +1,21 @@
 <script lang="ts">
-  import { quality, RESOLUTION_PRESETS, presetWidthFor } from '../lib/quality';
+  import { quality, RESOLUTION_PRESETS, presetWidthFor, MIN_PALETTE_SIZE, MAX_PALETTE_SIZE } from '../lib/quality';
+  import type { DitherMode } from '../lib/quantize';
+  import type { ColorSpace } from '../lib/palette';
 
   export let sourceWidth = 0;
   export let sourceHeight = 0;
+
+  const DITHER_MODES: { mode: DitherMode; label: string }[] = [
+    { mode: 'none', label: 'None' },
+    { mode: 'blue-noise', label: 'Blue-noise' },
+    { mode: 'bayer', label: 'Bayer' },
+  ];
+
+  const COLOR_SPACES: { mode: ColorSpace; label: string }[] = [
+    { mode: 'srgb', label: 'sRGB' },
+    { mode: 'linear', label: 'Linear' },
+  ];
 
   $: outputHeight =
     sourceWidth && sourceHeight
@@ -28,8 +41,22 @@
     quality.update((q) => ({ ...q, fps: Math.min(60, Math.max(1, Math.round(value))) }));
   }
 
-  function toggleDither() {
-    quality.update((q) => ({ ...q, dither: !q.dither }));
+  function setDitherMode(mode: DitherMode) {
+    quality.update((q) => ({ ...q, dither: mode }));
+  }
+
+  function setColorSpace(mode: ColorSpace) {
+    quality.update((q) => ({ ...q, colorSpace: mode }));
+  }
+
+  function onPaletteSizeInput(e: Event) {
+    const value = Number((e.target as HTMLInputElement).value);
+    if (!Number.isFinite(value)) return;
+    quality.update((q) => ({ ...q, paletteSize: Math.min(MAX_PALETTE_SIZE, Math.max(MIN_PALETTE_SIZE, Math.round(value))) }));
+  }
+
+  function toggleGlobalPalette() {
+    quality.update((q) => ({ ...q, globalPalette: !q.globalPalette }));
   }
 
   type LoopMode = 'infinite' | 'once' | 'n';
@@ -83,10 +110,40 @@
   </div>
 
   <div class="row">
-    <span class="label">Dither</span>
-    <button class="toggle" class:active={$quality.dither} on:click={toggleDither}>
-      {$quality.dither ? 'Blue-noise' : 'None'}
+    <span class="label">Palette size</span>
+    <input
+      type="range"
+      min={MIN_PALETTE_SIZE}
+      max={MAX_PALETTE_SIZE}
+      value={$quality.paletteSize}
+      on:input={onPaletteSizeInput}
+    />
+    <span class="value">{$quality.paletteSize} colors</span>
+  </div>
+
+  <div class="row">
+    <span class="label">Palette scope</span>
+    <button class="toggle" class:active={$quality.globalPalette} on:click={toggleGlobalPalette}>
+      {$quality.globalPalette ? 'Global' : 'Per-frame'}
     </button>
+  </div>
+
+  <div class="row">
+    <span class="label">Dither</span>
+    <div class="presets">
+      {#each DITHER_MODES as { mode, label }}
+        <button class:active={$quality.dither === mode} on:click={() => setDitherMode(mode)}>{label}</button>
+      {/each}
+    </div>
+  </div>
+
+  <div class="row">
+    <span class="label">Color space</span>
+    <div class="presets">
+      {#each COLOR_SPACES as { mode, label }}
+        <button class:active={$quality.colorSpace === mode} on:click={() => setColorSpace(mode)}>{label}</button>
+      {/each}
+    </div>
   </div>
 
   <div class="row">
