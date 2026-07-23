@@ -4,22 +4,45 @@ import { beginOp } from './status';
 const WORKING_CACHE_SIZE = 64;
 const THUMBNAIL_CACHE_SIZE = 1024;
 
-function touch<T extends { close(): void }>(cache: Map<number, T>, cap: number, key: number, value: T) {
+/** Inserts/refreshes `key` and evicts the oldest entry over `cap`, skipping `protectedKey` — used to keep the currently-displayed playhead frame alive through eviction pressure from unrelated background reads (size estimate / global palette sampling), which can each cache dozens of frames from a single far seek and blow past `cap` in one shot. */
+function touch<T extends { close(): void }>(
+  cache: Map<number, T>,
+  cap: number,
+  key: number,
+  value: T,
+  protectedKey: number | null = null,
+) {
   cache.delete(key);
   cache.set(key, value);
   while (cache.size > cap) {
-    const oldestKey = cache.keys().next().value as number;
-    cache.get(oldestKey)?.close();
-    cache.delete(oldestKey);
+    let victim: number | undefined;
+    for (const k of cache.keys()) {
+      if (k !== protectedKey) {
+        victim = k;
+        break;
+      }
+    }
+    if (victim === undefined) break; // everything left over cap is protected
+    cache.get(victim)?.close();
+    cache.delete(victim);
   }
 }
 
 export interface FrameSeeker {
   readonly frameCount: number;
   readonly keyframes: KeyframeIndex;
-  /** Seeks the playhead decoder to `frameIndex`, returning a full-resolution bitmap.
-   * The returned bitmap is cache-owned — do not close it. */
-  seekTo(frameIndex: number): Promise<ImageBitmap>;
+  /**
+   * Seeks the playhead decoder to `frameIndex`, returning a full-resolution
+   * bitmap. The returned bitmap is cache-owned — do not close it.
+   *
+   * Pass `pin: true` for the frame a caller intends to keep displaying (the
+   * playhead) — this exempts it from the working cache's LRU eviction until
+   * a different frame is pinned, so a size-estimate or global-palette
+   * sample seek elsewhere in the range can't evict it out from under a
+   * still-running quality pipeline. Leave it false for one-off background
+   * reads that shouldn't affect what's protected.
+   */
+  seekTo(frameIndex: number, options?: { pin?: boolean }): Promise<ImageBitmap>;
   /** Decodes and caches ~`thumbWidth`-wide thumbnails for the given (possibly
    * sparse) frame indices, skipping any already cached. Adjacent requested
    * frames are decoded as a single run so one keyframe seek covers many. */
@@ -36,6 +59,11 @@ export function createFrameSeeker(config: VideoDecoderConfig, chunks: EncodedVid
 
   let playheadDecoder: VideoDecoder | null = null;
   let seekQueue: Promise<unknown> = Promise.resolve();
+  // The frame currently exempt from workingCache eviction (see `touch`) —
+  // set synchronously at the start of a pinned `doSeek`, before any `await`,
+  // so every later-queued seek (pinned or not; they're all serialized
+  // through `seekQueue`) sees the up-to-date value.
+  let pinnedIndex: number | null = null;
 
   // Chrome's VideoDecoder requires the first decode() after any flush() to be
   // a keyframe again (undocumented in the spec text, but enforced in
@@ -45,10 +73,12 @@ export function createFrameSeeker(config: VideoDecoderConfig, chunks: EncodedVid
   // decoder, and caches every frame along the way. "Near-playhead" seeks are
   // fast because they land in that cached sweep; "far" seeks pay for a fresh
   // keyframe-to-target decode.
-  async function doSeek(frameIndex: number): Promise<ImageBitmap> {
+  async function doSeek(frameIndex: number, pin: boolean): Promise<ImageBitmap> {
+    if (pin) pinnedIndex = frameIndex;
+
     const cached = workingCache.get(frameIndex);
     if (cached) {
-      touch(workingCache, WORKING_CACHE_SIZE, frameIndex, cached);
+      touch(workingCache, WORKING_CACHE_SIZE, frameIndex, cached, pinnedIndex);
       return cached;
     }
 
@@ -69,7 +99,7 @@ export function createFrameSeeker(config: VideoDecoderConfig, chunks: EncodedVid
       const idx = kf + i;
       const bitmap = await createImageBitmap(frames[i]);
       frames[i].close();
-      touch(workingCache, WORKING_CACHE_SIZE, idx, bitmap);
+      touch(workingCache, WORKING_CACHE_SIZE, idx, bitmap, pinnedIndex);
     }
     playheadDecoder?.close();
     playheadDecoder = null;
@@ -79,9 +109,9 @@ export function createFrameSeeker(config: VideoDecoderConfig, chunks: EncodedVid
     return bitmap;
   }
 
-  function seekTo(frameIndex: number): Promise<ImageBitmap> {
+  function seekTo(frameIndex: number, options: { pin?: boolean } = {}): Promise<ImageBitmap> {
     const end = beginOp(`seeking to frame ${frameIndex}…`);
-    const result = seekQueue.then(() => doSeek(frameIndex));
+    const result = seekQueue.then(() => doSeek(frameIndex, options.pin ?? false));
     seekQueue = result.catch(() => {});
     result.finally(end);
     return result;

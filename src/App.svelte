@@ -557,11 +557,16 @@
 
   /** Decodes + renders `target`, updating the preview canvas + pipeline.
    * `sourceBitmap` is cache-owned by `seeker` — never close it directly; the
-   * seeker's LRU eviction handles that. */
+   * seeker's LRU eviction handles that. `pin: true` keeps this specific
+   * frame exempt from that eviction (see seek.ts) while it's on screen —
+   * without it, a background size-estimate or global-palette sample seek
+   * elsewhere in the range can evict it out from under a still-running
+   * quality pipeline, which was surfacing as a "the image source is
+   * detached" resize error on longer videos. */
   async function seekToFrame(target: number) {
     if (!seeker) return;
     try {
-      const bitmap = await seeker.seekTo(target);
+      const bitmap = await seeker.seekTo(target, { pin: true });
       sourceBitmap = bitmap;
       drawFrame(bitmap);
       sourceWidth = bitmap.width;
