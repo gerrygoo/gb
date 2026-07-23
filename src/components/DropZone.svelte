@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
 
   export let disabled = false;
+  export let compact = false;
 
   const dispatch = createEventDispatcher<{ file: File }>();
 
@@ -42,6 +43,7 @@
 
 <label
   class="drop-zone"
+  class:compact
   class:dragging
   class:disabled
   on:dragover={handleDragOver}
@@ -49,10 +51,14 @@
   on:drop={handleDrop}
 >
   <input type="file" accept="video/*" on:change={handleInput} {disabled} />
-  <span class="icon">🎬</span>
-  <p>{disabled ? 'Video import unavailable' : 'Drop a video file here'}</p>
-  {#if !disabled}
-    <p class="sub">or click to browse</p>
+  {#if compact}
+    <span class="compact-label">{disabled ? 'Video import unavailable' : 'Change video'}</span>
+  {:else}
+    <span class="icon">🎬</span>
+    <p>{disabled ? 'Video import unavailable' : 'Drop a video file here'}</p>
+    {#if !disabled}
+      <p class="sub">or click to browse</p>
+    {/if}
   {/if}
 </label>
 {#if errorMessage}
@@ -89,6 +95,23 @@
   .drop-zone.disabled:hover {
     border-color: #444;
     background: none;
+  }
+
+  .drop-zone.compact {
+    width: auto;
+    height: auto;
+    flex-direction: row;
+    gap: 0;
+    padding: 5px 12px;
+    border-style: solid;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .compact-label {
+    font-size: 0.8rem;
+    color: #ccc;
+    white-space: nowrap;
   }
 
   input[type='file'] {

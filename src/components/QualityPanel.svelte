@@ -82,99 +82,127 @@
 </script>
 
 <div class="quality-panel">
-  <div class="row">
-    <span class="label">Resolution</span>
-    <div class="presets">
-      {#each RESOLUTION_PRESETS as presetHeight}
-        <button class:active={activePreset === presetHeight} on:click={() => setPreset(presetHeight)}>
-          {presetHeight}p
-        </button>
-      {/each}
+  <section class="group">
+    <h3 class="group-label">Output</h3>
+    <div class="row">
+      <span class="label">Resolution</span>
+      <div class="presets">
+        {#each RESOLUTION_PRESETS as presetHeight}
+          <button class:active={activePreset === presetHeight} on:click={() => setPreset(presetHeight)}>
+            {presetHeight}p
+          </button>
+        {/each}
+      </div>
+      <label class="field">
+        <input type="number" min="2" step="2" value={$quality.targetWidth} on:change={onWidthInput} />
+        <span class="unit">× {outputHeight}px</span>
+      </label>
     </div>
-    <label class="field">
-      <input type="number" min="2" step="2" value={$quality.targetWidth} on:change={onWidthInput} />
-      <span class="unit">× {outputHeight}px</span>
-    </label>
-  </div>
 
-  <div class="row">
-    <span class="label">Output FPS</span>
-    <input
-      type="range"
-      min="1"
-      max="60"
-      value={$quality.fps}
-      on:input={onFpsInput}
-    />
-    <span class="value">{$quality.fps} fps</span>
-  </div>
-
-  <div class="row">
-    <span class="label">Palette size</span>
-    <input
-      type="range"
-      min={MIN_PALETTE_SIZE}
-      max={MAX_PALETTE_SIZE}
-      value={$quality.paletteSize}
-      on:input={onPaletteSizeInput}
-    />
-    <span class="value">{$quality.paletteSize} colors</span>
-  </div>
-
-  <div class="row">
-    <span class="label">Palette scope</span>
-    <button class="toggle" class:active={$quality.globalPalette} on:click={toggleGlobalPalette}>
-      {$quality.globalPalette ? 'Global' : 'Per-frame'}
-    </button>
-  </div>
-
-  <div class="row">
-    <span class="label">Dither</span>
-    <div class="presets">
-      {#each DITHER_MODES as { mode, label }}
-        <button class:active={$quality.dither === mode} on:click={() => setDitherMode(mode)}>{label}</button>
-      {/each}
+    <div class="row">
+      <span class="label">Output FPS</span>
+      <input
+        type="range"
+        min="1"
+        max="60"
+        value={$quality.fps}
+        on:input={onFpsInput}
+      />
+      <span class="value">{$quality.fps} fps</span>
     </div>
-  </div>
 
-  <div class="row">
-    <span class="label">Color space</span>
-    <div class="presets">
-      {#each COLOR_SPACES as { mode, label }}
-        <button class:active={$quality.colorSpace === mode} on:click={() => setColorSpace(mode)}>{label}</button>
-      {/each}
+    <div class="row">
+      <span class="label">Speed</span>
+      <input type="range" min="0.25" max="4" step="0.05" value={$quality.speed} on:input={onSpeedInput} />
+      <span class="value">{$quality.speed.toFixed(2)}×</span>
     </div>
-  </div>
+  </section>
 
-  <div class="row">
-    <span class="label">Loop</span>
-    <div class="presets">
-      <button class:active={loopMode === 'infinite'} on:click={() => setLoopMode('infinite')}>Infinite</button>
-      <button class:active={loopMode === 'once'} on:click={() => setLoopMode('once')}>1×</button>
-      <button class:active={loopMode === 'n'} on:click={() => setLoopMode('n')}>N×</button>
+  <section class="group">
+    <h3 class="group-label">Color</h3>
+    <div class="row">
+      <span class="label">Palette size</span>
+      <input
+        type="range"
+        min={MIN_PALETTE_SIZE}
+        max={MAX_PALETTE_SIZE}
+        value={$quality.paletteSize}
+        on:input={onPaletteSizeInput}
+      />
+      <span class="value">{$quality.paletteSize} colors</span>
     </div>
-    {#if loopMode === 'n'}
-      <input type="number" min="1" step="1" value={$quality.loopCount} on:change={onLoopNInput} />
-    {/if}
-  </div>
 
-  <div class="row">
-    <span class="label">Speed</span>
-    <input type="range" min="0.25" max="4" step="0.05" value={$quality.speed} on:input={onSpeedInput} />
-    <span class="value">{$quality.speed.toFixed(2)}×</span>
-  </div>
+    <div class="row">
+      <span class="label">Palette scope</span>
+      <button class="toggle" class:active={$quality.globalPalette} on:click={toggleGlobalPalette}>
+        {$quality.globalPalette ? 'Global' : 'Per-frame'}
+      </button>
+    </div>
+
+    <div class="row">
+      <span class="label">Dither</span>
+      <div class="presets">
+        {#each DITHER_MODES as { mode, label }}
+          <button class:active={$quality.dither === mode} on:click={() => setDitherMode(mode)}>{label}</button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="row">
+      <span class="label">Color space</span>
+      <div class="presets">
+        {#each COLOR_SPACES as { mode, label }}
+          <button class:active={$quality.colorSpace === mode} on:click={() => setColorSpace(mode)}>{label}</button>
+        {/each}
+      </div>
+    </div>
+  </section>
+
+  <section class="group">
+    <h3 class="group-label">Playback</h3>
+    <div class="row">
+      <span class="label">Loop</span>
+      <div class="presets">
+        <button class:active={loopMode === 'infinite'} on:click={() => setLoopMode('infinite')}>Infinite</button>
+        <button class:active={loopMode === 'once'} on:click={() => setLoopMode('once')}>1×</button>
+        <button class:active={loopMode === 'n'} on:click={() => setLoopMode('n')}>N×</button>
+      </div>
+      {#if loopMode === 'n'}
+        <input type="number" min="1" step="1" value={$quality.loopCount} on:change={onLoopNInput} />
+      {/if}
+    </div>
+  </section>
 </div>
 
 <style>
   .quality-panel {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 16px;
     width: 100%;
-    max-width: 480px;
-    padding: 12px 16px;
+    padding: 14px 16px;
     border: 1px solid #333;
     border-radius: 6px;
+  }
+
+  .group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .group + .group {
+    padding-top: 14px;
+    border-top: 1px solid #262626;
+  }
+
+  .group-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #666;
+    margin: 0;
   }
 
   .row {

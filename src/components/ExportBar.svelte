@@ -18,7 +18,7 @@
 
 <div class="export-bar">
   <div class="row">
-    <button on:click={() => dispatch('encode')} disabled={exporting || disabled}>
+    <button class="primary" on:click={() => dispatch('encode')} disabled={exporting || disabled}>
       {exporting ? 'Encoding…' : 'Export animated GIF'}
     </button>
     {#if exporting}
@@ -73,6 +73,17 @@
   button:disabled {
     opacity: 0.4;
     cursor: default;
+  }
+
+  button.primary {
+    border-color: #2c6a94;
+    background: #2a6ca8;
+    color: #fff;
+    font-weight: 600;
+  }
+
+  button.primary:hover:not(:disabled) {
+    background: #3480c4;
   }
 
   button.cancel {

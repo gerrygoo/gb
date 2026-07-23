@@ -719,24 +719,36 @@
 <svelte:window on:keydown={onGlobalKeydown} />
 
 <main>
-  <h1>gif builder</h1>
-  <p class="gpu-status" class:gpu-failed={gpuFailed}>{gpuStatus}</p>
+  <header class="topbar">
+    <h1>gif builder</h1>
+    <div class="topbar-status">
+      <p class="gpu-status" class:gpu-failed={gpuFailed} title={gpuStatus}>
+        {gpuFailed ? 'GPU unavailable' : 'GPU ready'}
+      </p>
+      <p class="busy-status" class:idle={$statusText === 'Idle'}>{$statusText}</p>
+    </div>
+  </header>
+
   {#if gpuFailed}
     <p class="gpu-blocking">
       This browser can't run the GPU pipeline this tool needs. Try Chrome/Edge, or Safari 17+, with
       hardware acceleration enabled.
     </p>
   {/if}
-  <p class="busy-status" class:idle={$statusText === 'Idle'}>{$statusText}</p>
-  <DropZone on:file={handleFile} disabled={gpuFailed} />
-  {#if fileName}
-    <p class="file-name">{fileName}</p>
+
+  {#if !fileName}
+    <DropZone on:file={handleFile} disabled={gpuFailed} />
+  {:else}
+    <div class="file-bar">
+      <div class="file-info">
+        <span class="file-name">{fileName}</span>
+        {#if status}<span class="file-meta">{status}</span>{/if}
+      </div>
+      <DropZone compact on:file={handleFile} disabled={gpuFailed} />
+    </div>
   {/if}
   {#if fileSizeWarning}
     <p class="warning-text">{fileSizeWarning}</p>
-  {/if}
-  {#if status}
-    <p class="status">{status}</p>
   {/if}
   {#if initialLoading}
     <div class="loading-row">
@@ -744,77 +756,91 @@
       <span>Loading video…</span>
     </div>
   {/if}
-  <canvas bind:this={canvas} class:hidden={!fileName}></canvas>
 
   {#if seeker}
-    <Timeline
-      frameCount={seeker.frameCount}
-      {playhead}
-      {inPoint}
-      {outPoint}
-      getCachedThumbnail={seeker.getCachedThumbnail}
-      loadThumbnails={seeker.loadThumbnails}
-      {frameDurationUs}
-      on:seek={(e) => queueSeek(e.detail)}
-      on:setIn={handleSetIn}
-      on:setOut={handleSetOut}
-    />
-  {/if}
-
-  {#if sourceBitmap}
-    <QualityPanel {sourceWidth} {sourceHeight} />
-    {#if resizeStatus}
-      <p class="status">{resizeStatus}</p>
-    {/if}
-    <div class="comparison">
-      <div class="comparison-pane">
-        <p class="pane-label">GPU · Lanczos-3</p>
-        <canvas bind:this={gpuCanvas}></canvas>
-      </div>
-      <div class="comparison-pane">
-        <p class="pane-label">Canvas 2D · drawImage</p>
-        <canvas bind:this={browserCanvas}></canvas>
-      </div>
-      <div class="comparison-pane">
-        <p class="pane-label">Palette · median-cut (256 colors)</p>
-        {#if paletteStatus}
-          <p class="status">{paletteStatus}</p>
+    <div class="workspace">
+      <div class="main-col">
+        {#if quantizeStatus}
+          <p class="status preview-status">{quantizeStatus}</p>
         {/if}
-        <canvas bind:this={paletteCanvas} class="palette-canvas"></canvas>
+        <Preview
+          width={previewWidth}
+          height={previewHeight}
+          sourceImageData={previewSourceImageData}
+          quantizedImageData={previewQuantizedImageData}
+        />
+
+        <Timeline
+          frameCount={seeker.frameCount}
+          {playhead}
+          {inPoint}
+          {outPoint}
+          getCachedThumbnail={seeker.getCachedThumbnail}
+          loadThumbnails={seeker.loadThumbnails}
+          {frameDurationUs}
+          on:seek={(e) => queueSeek(e.detail)}
+          on:setIn={handleSetIn}
+          on:setOut={handleSetOut}
+        />
       </div>
+
+      {#if sourceBitmap}
+        <aside class="side-col">
+          <QualityPanel {sourceWidth} {sourceHeight} />
+
+          <div class="export-card">
+            <SizeEstimate estimate={sizeEstimate} {estimating} />
+            <ExportBar
+              exporting={animExporting}
+              disabled={!currentDemux}
+              progress={animExportProgress}
+              statusText={animExportStatus}
+              error={animExportError}
+              downloadUrl={animExportUrl}
+              downloadBytes={animExportBytes}
+              on:encode={exportAnimatedGif}
+              on:cancel={cancelAnimatedExport}
+            />
+            <button class="frame-export" on:click={exportSingleFrameGif} disabled={!quantizedIndices}>
+              or export just the current frame
+            </button>
+            {#if exportStatus}
+              <p class="status">{exportStatus}</p>
+            {/if}
+          </div>
+        </aside>
+      {/if}
     </div>
 
-    <h2 class="ab-heading">Preview</h2>
-    {#if quantizeStatus}
-      <p class="status">{quantizeStatus}</p>
-    {/if}
-    <Preview
-      width={previewWidth}
-      height={previewHeight}
-      sourceImageData={previewSourceImageData}
-      quantizedImageData={previewQuantizedImageData}
-    />
-
-    <h2 class="ab-heading">Export</h2>
-    <div class="export-row">
-      <button on:click={exportSingleFrameGif} disabled={!quantizedIndices}>Export current frame as GIF</button>
-    </div>
-    {#if exportStatus}
-      <p class="status">{exportStatus}</p>
-    {/if}
-
-    <SizeEstimate estimate={sizeEstimate} {estimating} />
-    <ExportBar
-      exporting={animExporting}
-      disabled={!currentDemux}
-      progress={animExportProgress}
-      statusText={animExportStatus}
-      error={animExportError}
-      downloadUrl={animExportUrl}
-      downloadBytes={animExportBytes}
-      on:encode={exportAnimatedGif}
-      on:cancel={cancelAnimatedExport}
-    />
+    <details class="debug-disclosure">
+      <summary>Debug: raw decode, resize comparison &amp; palette</summary>
+        <div class="debug-body">
+          <div class="comparison-pane">
+            <p class="pane-label">Raw decoded frame</p>
+            <canvas bind:this={canvas}></canvas>
+          </div>
+          {#if resizeStatus}
+            <p class="status">{resizeStatus}</p>
+          {/if}
+          <div class="comparison">
+            <div class="comparison-pane">
+              <p class="pane-label">GPU · Lanczos-3</p>
+              <canvas bind:this={gpuCanvas}></canvas>
+            </div>
+            <div class="comparison-pane">
+              <p class="pane-label">Canvas 2D · drawImage</p>
+              <canvas bind:this={browserCanvas}></canvas>
+            </div>
+            <div class="comparison-pane">
+              <p class="pane-label">Palette · median-cut</p>
+              {#if paletteStatus}
+                <p class="status">{paletteStatus}</p>
+              {/if}
+              <canvas bind:this={paletteCanvas} class="palette-canvas"></canvas>
+            </div>
+          </div>
+        </div>
+      </details>
   {/if}
 </main>
 
@@ -866,7 +892,12 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 24px;
+    gap: 20px;
+    width: 100%;
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 24px 24px 60px;
+    box-sizing: border-box;
   }
 
   h1 {
@@ -874,11 +905,53 @@
     font-weight: 600;
     letter-spacing: -0.5px;
     color: #e0e0e0;
+    margin: 0;
+  }
+
+  .topbar {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    align-self: stretch;
+  }
+
+  .topbar-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .file-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    align-self: stretch;
+    max-width: 960px;
+  }
+
+  .file-info {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    flex-wrap: wrap;
   }
 
   .file-name {
     font-size: 0.9rem;
-    color: #888;
+    color: #ccc;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .file-meta {
+    font-size: 0.8rem;
+    color: #666;
   }
 
   .busy-status {
@@ -891,7 +964,7 @@
     background: rgba(224, 184, 74, 0.08);
     border-radius: 999px;
     padding: 2px 12px;
-    margin: -12px 0 0;
+    margin: 0;
   }
 
   .busy-status.idle {
@@ -903,17 +976,26 @@
   .status {
     font-size: 0.85rem;
     color: #666;
+    margin: 0;
+  }
+
+  .preview-status {
+    text-align: center;
   }
 
   .gpu-status {
     font-size: 0.75rem;
     color: #666;
-    text-align: center;
-    max-width: 480px;
+    margin: 0;
+    border: 1px solid #2a2a2a;
+    border-radius: 999px;
+    padding: 2px 12px;
+    cursor: default;
   }
 
   .gpu-status.gpu-failed {
     color: #e08a8a;
+    border-color: #663333;
   }
 
   .gpu-blocking {
@@ -925,7 +1007,6 @@
     background: rgba(224, 138, 138, 0.08);
     border-radius: 6px;
     padding: 8px 14px;
-    margin: -12px 0 0;
   }
 
   .warning-text {
@@ -1052,35 +1133,84 @@
     border-radius: 4px;
   }
 
-  canvas.hidden {
-    display: none;
+  .workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 24px;
+    align-self: stretch;
+    align-items: start;
   }
 
-  .export-row {
+  .main-col {
     display: flex;
-    gap: 8px;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
   }
 
-  .export-row button {
-    padding: 6px 14px;
-    border: 1px solid #444;
-    border-radius: 4px;
-    background: #1a1a1a;
-    color: #ccc;
+  .side-col {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    position: sticky;
+    top: 20px;
+  }
+
+  .export-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 16px;
+    border: 1px solid #333;
+    border-radius: 6px;
+  }
+
+  .frame-export {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    color: #777;
+    font-size: 0.75rem;
+    text-decoration: underline;
+    text-underline-offset: 2px;
     cursor: pointer;
-    font-size: 0.85rem;
+    padding: 0;
   }
 
-  .export-row button:disabled {
+  .frame-export:hover:not(:disabled) {
+    color: #aaa;
+  }
+
+  .frame-export:disabled {
     opacity: 0.4;
     cursor: default;
   }
 
-  .ab-heading {
-    font-size: 1rem;
-    font-weight: 600;
-    color: #ccc;
-    margin: 8px 0 0;
+  .debug-disclosure {
+    align-self: stretch;
+    border: 1px solid #262626;
+    border-radius: 6px;
+    padding: 4px 16px;
+  }
+
+  .debug-disclosure summary {
+    font-size: 0.75rem;
+    color: #666;
+    cursor: pointer;
+    padding: 8px 0;
+  }
+
+  .debug-disclosure summary:hover {
+    color: #999;
+  }
+
+  .debug-body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0 16px;
   }
 
   .comparison {
@@ -1116,10 +1246,24 @@
     image-rendering: pixelated;
   }
 
+  @media (max-width: 900px) {
+    .workspace {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .side-col {
+      position: static;
+    }
+  }
+
   @media (max-width: 700px) {
     main {
       gap: 16px;
-      padding: 0 4px;
+      padding: 0 4px 40px;
+    }
+
+    .file-bar {
+      flex-wrap: wrap;
     }
 
     .comparison {
