@@ -95,23 +95,45 @@ Unscoped ideas beyond what's below live in `docs/future-ideas.md`.
 > See `docs/webm-scoping.md` for why this is a blocking prerequisite
 > rather than a fork.
 
-- [ ] Land the current uncommitted redesign (`App.svelte`, `DropZone.svelte`,
+- [x] Land the current uncommitted redesign (`App.svelte`, `DropZone.svelte`,
   `ExportBar.svelte`, `QualityPanel.svelte`) as its own commit first, so
   the extraction is a clean, separately-reviewable diff on top of it.
-- [ ] Design `PipelineShell.svelte`'s boundary: owns topbar, file-bar/
+- [x] Design `PipelineShell.svelte`'s boundary: owns topbar, file-bar/
   DropZone wiring, GPU init + status, demux/decode/seek, playhead/in/out/
-  frameDurationUs state, `initialLoading`/`fileSizeWarning`, and the
-  Timeline + source-side Preview rendering. Exposes the resized source
-  frame (texture/ImageData), `sourceWidth`/`sourceHeight`, `seeker`,
-  `inPoint`/`outPoint`/`playhead`/`frameDurationUs`, and `currentDemux`
-  to a slot for format-specific quality controls + export.
-- [ ] Move that logic out of `App.svelte` into the shell; rename
+  frameDurationUs state, `initialLoading`/`fileSizeWarning`, Timeline, and
+  the resize step (Lanczos) that feeds Preview's source layer. Exposes
+  `seeker`/`currentDemux`/`playhead`/`inPoint`/`outPoint`/
+  `frameDurationUs`/`sourceWidth`/`sourceHeight`/`sourceBitmap`/
+  `gpuContext` via `bind:` (slot props alone don't reach a consumer's own
+  `<script>` logic, and several — export, size-estimate — need them
+  there, not just in markup), plus an `onResized` callback prop awaited
+  as part of the shell's own resize queue so a consumer's GPU work
+  (histogram/quantize) can't be raced by the next resize's texture
+  `destroy()` — the same single-flight discipline the old combined
+  `runQualityPipeline` enforced internally, now spanning the component
+  boundary. `onFileChange` callback resets consumer-owned state in step
+  with the shell's own reset. Named slots (`main`/`side`/`debug`) hold
+  GIF-specific UI; `Timeline.svelte` and the resize step are shell-owned,
+  but `Preview.svelte` itself stays with the GIF-specific slot content
+  for now — splitting its source/quantized layers apart isn't needed
+  until a second consumer actually exists.
+- [x] Move that logic out of `App.svelte` into the shell; rename
   `App.svelte` → `GifApp.svelte` (`git mv`, keep history) once it's
   reduced to the GIF-specific slot content (quantize/palette/dither,
   `QualityPanel`, `SizeEstimate`, `ExportBar`, the debug disclosure).
-- [ ] `main.ts` updated to mount `GifApp.svelte`. No visible/behavioral
+- [x] `main.ts` updated to mount `GifApp.svelte`. No visible/behavioral
   change to the deployed GIF app — this phase is pure internal reuse
-  prep.
+  prep. Verified via `tsc`/`svelte-check`/`vite build` (all clean besides
+  the pre-existing `Preview.svelte` a11y warning) and a headless-browser
+  smoke pass (file load → demux → seek → Timeline/QualityPanel render →
+  in/out points → keyboard shortcuts all worked correctly). The
+  GPU-dependent resize/quantize/export chain could not be exercised
+  live — this sandbox has no WebGPU adapter, the same
+  SwiftShader/no-hardware-GPU limitation Phase 13 already flags — so
+  that path is verified by design/code review only (the `onResized`
+  hand-off preserves the original texture-destroy ordering) rather than
+  a live run; worth a manual check in a real GPU browser before trusting
+  it fully.
 
 ## Phase 15 — WebM app scaffold + deployment
 > Done when: `gb.ggo.blue/webm/` serves a `WebmApp.svelte` built on

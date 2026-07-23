@@ -1,8 +1,8 @@
 import { mount } from 'svelte'
 import './app.css'
-import App from './App.svelte'
+import GifApp from './GifApp.svelte'
 
-const app = mount(App, {
+const app = mount(GifApp, {
   target: document.getElementById('app')!,
 })
 
