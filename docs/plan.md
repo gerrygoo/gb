@@ -84,3 +84,82 @@ Unscoped ideas beyond what's below live in `docs/future-ideas.md`.
   profiling shows these as the actual bottleneck rather than the
   serialization, scope a follow-up based on what the data says rather
   than guessing.
+
+## Phase 14 — Extract shared pipeline orchestration (blocks Phase 15+)
+> Done when: `App.svelte`'s file-load → demux → decode → seek/timeline →
+> GPU-resize-preview orchestration lives in a `PipelineShell.svelte` that
+> the GIF app builds on, GIF app behavior is unchanged end-to-end
+> (including the in-flight layout redesign currently uncommitted on
+> disk), and `App.svelte` itself is reduced to GIF-specific state
+> (quantize/palette/dither/encode) plumbed through the shell's slot.
+> See `docs/webm-scoping.md` for why this is a blocking prerequisite
+> rather than a fork.
+
+- [ ] Land the current uncommitted redesign (`App.svelte`, `DropZone.svelte`,
+  `ExportBar.svelte`, `QualityPanel.svelte`) as its own commit first, so
+  the extraction is a clean, separately-reviewable diff on top of it.
+- [ ] Design `PipelineShell.svelte`'s boundary: owns topbar, file-bar/
+  DropZone wiring, GPU init + status, demux/decode/seek, playhead/in/out/
+  frameDurationUs state, `initialLoading`/`fileSizeWarning`, and the
+  Timeline + source-side Preview rendering. Exposes the resized source
+  frame (texture/ImageData), `sourceWidth`/`sourceHeight`, `seeker`,
+  `inPoint`/`outPoint`/`playhead`/`frameDurationUs`, and `currentDemux`
+  to a slot for format-specific quality controls + export.
+- [ ] Move that logic out of `App.svelte` into the shell; rename
+  `App.svelte` → `GifApp.svelte` (`git mv`, keep history) once it's
+  reduced to the GIF-specific slot content (quantize/palette/dither,
+  `QualityPanel`, `SizeEstimate`, `ExportBar`, the debug disclosure).
+- [ ] `main.ts` updated to mount `GifApp.svelte`. No visible/behavioral
+  change to the deployed GIF app — this phase is pure internal reuse
+  prep.
+
+## Phase 15 — WebM app scaffold + deployment
+> Done when: `gb.ggo.blue/webm/` serves a `WebmApp.svelte` built on
+> `PipelineShell.svelte`, even if export is still a stub, via the same
+> `npm run build` / GitHub Pages workflow the GIF app already uses.
+
+- [ ] `vite.config.ts`: multi-page build — `build.rollupOptions.input`
+  gets `webm/index.html` alongside the root `index.html`.
+- [ ] New `webm/index.html` + `src/webmMain.ts` mounting `WebmApp.svelte`.
+- [ ] `WebmApp.svelte`: `PipelineShell` + a placeholder side panel (no
+  real encode yet) — proves the shell's slot contract works for a
+  second, differently-shaped consumer before wiring real encode logic.
+- [ ] Small cross-links between the two apps' top bars.
+- [ ] Deploy, confirm `gb.ggo.blue/webm/` resolves (and check the
+  no-trailing-slash `gb.ggo.blue/webm` case on GitHub Pages).
+
+## Phase 16 — WebM encode pipeline
+> Done when: a user can export a trimmed/resized clip as a real,
+> playable `.webm` file (VP9 video, no audio) from `WebmApp.svelte`.
+
+- [ ] Add `mediabunny` dependency (WebM muxer half only — `mp4box.js`
+  stays the demuxer, unchanged).
+- [ ] Per-frame: reuse `resize.ts`'s GPU-resized texture → draw to
+  canvas → `new VideoFrame(canvas, { timestamp, duration })` → feed
+  `VideoEncoder` (VP9, bitrate-target config) → Mediabunny muxer's
+  `addEncodedVideoChunk` via the encoder's output callback.
+- [ ] Resolve the `VideoFrame`-transfer-to-worker open question (see
+  `docs/webm-scoping.md`) before committing to a main-thread-vs-worker
+  split for encode; fall back to main-thread encode if transfer proves
+  unreliable.
+- [ ] New `webmEncodeWorker.ts` / `webmEncodeClient.ts` /
+  `webmEncodeProtocol.ts` (or main-thread equivalent per the above),
+  mirroring the GIF app's worker split but carrying resized frames
+  instead of palette indices.
+- [ ] Timestamp/duration handling for the speed knob — scales the
+  continuous timestamp stream, not a discrete per-frame delay like GIF's
+  centisecond field.
+
+## Phase 17 — WebM quality panel + size estimate
+> Done when: `WebmQualityPanel.svelte` exposes bitrate + keyframe
+> interval + the shared resolution/fps/speed rows, and a live size
+> estimate tracks the exported file size closely.
+
+- [ ] `WebmQualityPanel.svelte`: resolution/fps/speed rows (reusing
+  `quality.ts` helpers), bitrate slider (kbps), keyframe-interval field.
+  No palette/dither/color-space/loop rows — not applicable to WebM.
+- [ ] `estimateWebm.ts`: arithmetic estimate
+  (`bitrate_kbps * duration_s / 8 * 1000` + muxer-overhead constant) —
+  no sampling pass needed, unlike GIF's `estimate.ts`.
+- [ ] Wire into `SizeEstimate.svelte` (shared component, format-specific
+  estimate function passed in).
