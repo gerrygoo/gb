@@ -13,6 +13,11 @@
 
   export let title = 'video tool';
 
+  /** Optional nav link rendered next to the title — e.g. GIF/WebM app
+   * cross-links to their sibling app. Purely chrome; the shell has no
+   * opinion on where it points. */
+  export let crossLink: { href: string; label: string } | null = null;
+
   /** Fired (and awaited) once per completed resize, carrying ownership of the
    * new texture to the caller — this component keeps no reference to it once
    * handed off, so the caller is responsible for destroying it (typically
@@ -311,6 +316,9 @@
 <main>
   <header class="topbar">
     <h1>{title}</h1>
+    {#if crossLink}
+      <a class="cross-link" href={crossLink.href}>{crossLink.label}</a>
+    {/if}
     <div class="topbar-status">
       <p class="gpu-status" class:gpu-failed={gpuFailed} title={gpuStatus}>
         {gpuFailed ? 'GPU unavailable' : 'GPU ready'}
@@ -448,6 +456,16 @@
     justify-content: center;
     gap: 8px;
     align-self: stretch;
+  }
+
+  .cross-link {
+    font-size: 0.8rem;
+    color: #7ec4e0;
+    text-decoration: none;
+  }
+
+  .cross-link:hover {
+    text-decoration: underline;
   }
 
   .topbar-status {

@@ -189,13 +189,24 @@ the worked example of every wiring point below.
   adapter. Check `frame.texture`/`imageData` actually arrive correctly
   in a real GPU browser before building much on top of `onResized`.
 
-- [ ] `vite.config.ts`: multi-page build — `build.rollupOptions.input`
+- [x] `vite.config.ts`: multi-page build — `build.rollupOptions.input`
   gets `webm/index.html` alongside the root `index.html`.
-- [ ] New `webm/index.html` + `src/webmMain.ts` mounting `WebmApp.svelte`.
-- [ ] `WebmApp.svelte`: `PipelineShell` + a placeholder side panel (no
+- [x] New `webm/index.html` + `src/webmMain.ts` mounting `WebmApp.svelte`.
+- [x] `WebmApp.svelte`: `PipelineShell` + a placeholder side panel (no
   real encode yet) — proves the shell's slot contract works for a
   second, differently-shaped consumer before wiring real encode logic.
-- [ ] Small cross-links between the two apps' top bars.
+  Binds the full consumer contract (`seeker`/`currentDemux`/`inPoint`/
+  `outPoint`/etc.) even though only `onResized`'s `imageData` is used yet
+  (drawn straight to a canvas, no quantize step), so Phase 16 doesn't
+  need to add bindings later. `handleFileChange` only resets the resized
+  texture — there's no estimate/export state yet to mirror `GifApp`'s
+  reset.
+- [x] Small cross-links between the two apps' top bars. Added as a new
+  `PipelineShell` prop (`crossLink: { href, label } | null`, rendered
+  next to the `<h1>`) rather than GIF/WebM-specific — the shell already
+  owns the topbar and has no opinion on where the link points. Both
+  apps link via absolute paths (`/webm/` and `/`) since the site is
+  served from the domain root, not a GitHub Pages project subpath.
 - [ ] Deploy, confirm `gb.ggo.blue/webm/` resolves (and check the
   no-trailing-slash `gb.ggo.blue/webm` case on GitHub Pages).
 

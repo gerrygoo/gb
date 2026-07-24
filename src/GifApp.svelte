@@ -490,6 +490,7 @@
 
 <PipelineShell
   title="gif builder"
+  crossLink={{ href: '/webm/', label: 'webm exporter →' }}
   bind:seeker
   bind:currentDemux
   bind:playhead
