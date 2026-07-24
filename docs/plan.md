@@ -140,6 +140,55 @@ Unscoped ideas beyond what's below live in `docs/future-ideas.md`.
 > `PipelineShell.svelte`, even if export is still a stub, via the same
 > `npm run build` / GitHub Pages workflow the GIF app already uses.
 
+**Handoff (post-Phase 14, 2026-07-23):** `PipelineShell.svelte`
+(`src/components/PipelineShell.svelte`) exists and `GifApp.svelte`
+(`src/GifApp.svelte`, formerly `App.svelte`) is its first consumer —
+read `GifApp.svelte` end to end before writing `WebmApp.svelte`; it's
+the worked example of every wiring point below.
+
+- **Props to pass in:** `title` (string, shown in the topbar `<h1>`;
+  WebM app should pass something like `"webm exporter"`).
+- **Props to `bind:`** (read in the consumer's own `<script>`, not just
+  markup — that's why these are plain bindable props rather than slot
+  props): `seeker`, `currentDemux`, `playhead`, `inPoint`, `outPoint`,
+  `frameDurationUs`, `sourceWidth`, `sourceHeight`, `sourceBitmap`,
+  `gpuContext`.
+- **Callback props:** `onResized(frame: { texture: GPUTexture; imageData:
+  ImageData; width: number; height: number }) => Promise<void>` — called
+  once per completed resize, *awaited* as part of the shell's own resize
+  queue. A consumer takes ownership of `frame.texture` here (destroy the
+  previous one it was holding, keep this one) — do NOT let this callback
+  return before any GPU work reading `frame.texture` is done, or the
+  shell's next resize can destroy it mid-read. This is the hand-off
+  WebM's per-frame `VideoEncoder` feed (Phase 16) plugs into: no
+  histogram/palette/quantize step, just `frame.texture`/`imageData`
+  straight to the encode path. `onFileChange() => void` — called
+  synchronously at the start of a new file load, before demuxing; reset
+  consumer-owned state (for WebM: any encode/estimate/export state,
+  mirroring what `GifApp.svelte`'s `handleFileChange` resets) here.
+- **Named slots:** `main` (rendered in the main column, above the
+  shell-owned `Timeline` — GIF puts its `quantizeStatus` text + `Preview`
+  here; WebM's equivalent is presumably just a `Preview`-style source
+  monitor, no quantized layer), `side` (sticky sidebar — quality
+  controls + export UI go here; for WebM that's `WebmQualityPanel` +
+  `SizeEstimate` + a WebM `ExportBar` equivalent, Phase 17), `debug`
+  (collapsed disclosure below the workspace, receives `resizeStatus` as
+  a slot prop — optional, only bother with it if there's something
+  useful to show).
+- **What the shell does NOT do:** it doesn't know about GIF- or
+  WebM-specific quality fields (palette/dither/bitrate/etc.) — it only
+  reads `quality.targetWidth` (via `lib/quality.ts`, still the one
+  shared store) to size its resize step, and re-runs that resize on
+  *any* `quality` store change, trusting the consumer to ignore
+  `onResized` calls it doesn't care about. If/when Phase 17 splits GIF-
+  and WebM-specific quality stores apart, revisit this — right now both
+  apps would share one `quality` store, which is fine for Phase 15's
+  stub but wrong once WebM has its own bitrate/keyframe fields.
+- **Not yet verified live:** the resize step itself was only verified by
+  code review in the Phase 14 session — the sandbox used had no WebGPU
+  adapter. Check `frame.texture`/`imageData` actually arrive correctly
+  in a real GPU browser before building much on top of `onResized`.
+
 - [ ] `vite.config.ts`: multi-page build — `build.rollupOptions.input`
   gets `webm/index.html` alongside the root `index.html`.
 - [ ] New `webm/index.html` + `src/webmMain.ts` mounting `WebmApp.svelte`.
