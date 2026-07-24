@@ -1,9 +1,15 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   import PipelineShell from './components/PipelineShell.svelte';
+  import ExportBar from './components/ExportBar.svelte';
   import type { DemuxResult } from './lib/demux';
+  import { decodeFramesStreaming, nearestKeyframeAtOrBefore } from './lib/decode';
   import type { FrameSeeker } from './lib/seek';
   import type { GPUContext } from './lib/gpu';
+  import { frameToTexture, resize, textureToImageData } from './lib/resize';
+  import { WebmEncodeWorkerClient } from './lib/webmEncodeClient';
+  import { quality, computeOutputDims } from './lib/quality';
 
   // Bound from PipelineShell — see GifApp.svelte / PipelineShell.svelte for
   // why plain export + bind: is used instead of slot props. Most of these
@@ -23,8 +29,18 @@
   let previewCanvas: HTMLCanvasElement;
   let resizedTexture: GPUTexture | null = null;
 
+  let webmExportStatus = '';
+  let webmExporting = false;
+  let webmExportProgress: { current: number; total: number } | null = null;
+  let webmExportError: string | null = null;
+  let webmExportUrl: string | null = null;
+  let webmExportBytes: number | null = null;
+  let exportAbort: AbortController | null = null;
+
   onDestroy(() => {
     resizedTexture?.destroy();
+    exportAbort?.abort();
+    revokeWebmExportUrl();
   });
 
   /** Stub back half of what GifApp's handleResized does: no
@@ -48,6 +64,216 @@
   function handleFileChange() {
     resizedTexture?.destroy();
     resizedTexture = null;
+    exportAbort?.abort();
+    revokeWebmExportUrl();
+    webmExportStatus = '';
+    webmExportError = null;
+    webmExportBytes = null;
+  }
+
+  function triggerDownload(url: string, filename: string) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+  }
+
+  function revokeWebmExportUrl() {
+    if (webmExportUrl) {
+      URL.revokeObjectURL(webmExportUrl);
+      webmExportUrl = null;
+    }
+  }
+
+  // Rough VP9 "medium-quality" bits-per-pixel-per-frame heuristic, used as a
+  // stand-in bitrate target until Phase 17 adds a user-facing kbps slider.
+  const BITS_PER_PIXEL = 0.06;
+
+  /** The real per-frame encode path — structured like GifApp.svelte's
+   * exportAnimatedGif (its own decodeFramesStreaming loop over the
+   * keyframe-aligned in/out range, its own direct frameToTexture/resize()
+   * calls per tick, fps-resampling against a cumulative-duration timeline),
+   * but with no histogram/palette/quantize step: the resized frame goes
+   * straight to a VideoFrame for VP9 encoding. Unlike GIF's discrete
+   * per-frame delayCs, WebM wants a continuous microsecond timestamp
+   * stream, so `speed` scales the tick interval directly rather than a
+   * single per-frame delay. */
+  async function exportWebm() {
+    if (!currentDemux || !seeker || webmExporting) return;
+    webmExporting = true;
+    webmExportError = null;
+    webmExportProgress = null;
+    revokeWebmExportUrl();
+    webmExportBytes = null;
+    const abort = new AbortController();
+    exportAbort = abort;
+    const worker = new WebmEncodeWorkerClient();
+    const { track, chunks } = currentDemux;
+    const from = inPoint;
+    const to = outPoint;
+    // Decoding must start at a keyframe, which may fall before `from` — decode
+    // the full run, then drop the lead-in frames that exist only to prime the
+    // decoder state, so the export starts exactly at the in point.
+    const rangeStart = nearestKeyframeAtOrBefore(seeker.keyframes, from);
+    const rangeChunks = chunks.slice(rangeStart, to + 1);
+    const leadInCount = from - rangeStart;
+
+    try {
+      webmExportStatus = `preparing export (in/out ${from + 1}–${to + 1})…`;
+      const { device } = await gpuContext;
+      const { targetWidth, fps: outputFps, speed } = get(quality);
+      const { width, height } = computeOutputDims(targetWidth, sourceWidth, sourceHeight);
+
+      const bitrate = Math.max(100_000, Math.round(width * height * outputFps * BITS_PER_PIXEL));
+      await worker.start(bitrate);
+
+      // Build the output timeline from the encoded chunks' own `duration`,
+      // same approach as GIF's export (see its own comment for why `duration`
+      // and not presentation `timestamp` — decode-order vs. presentation-order).
+      const selectionChunks = chunks.slice(from, to + 1);
+      let cursor = 0;
+      const frameStartUs = selectionChunks.map((c) => {
+        const start = cursor;
+        cursor += c.duration ?? frameDurationUs;
+        return start;
+      });
+      const totalDurationUs = cursor;
+      // Source frames are always sampled at the real output cadence
+      // (`baseIntervalUs`) regardless of speed — only the timestamps written
+      // into the encoded file are scaled, so `speed` changes playback rate
+      // without also resampling which content gets shown.
+      const baseIntervalUs = 1_000_000 / outputFps;
+      const outputIntervalUs = baseIntervalUs / speed;
+      const outputFrameCount = Math.max(1, Math.round(totalDurationUs / baseIntervalUs) || 1);
+
+      function nearestSourceIndex(tUs: number): number {
+        let lo = 0;
+        let hi = frameStartUs.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (frameStartUs[mid] < tUs) lo = mid + 1;
+          else hi = mid;
+        }
+        if (lo > 0 && Math.abs(frameStartUs[lo - 1] - tUs) <= Math.abs(frameStartUs[lo] - tUs)) {
+          return lo - 1;
+        }
+        return lo;
+      }
+
+      const tickIndices: number[] = [];
+      for (let k = 0; k < outputFrameCount; k++) {
+        tickIndices.push(nearestSourceIndex(k * baseIntervalUs));
+      }
+
+      let cancelled = false;
+      webmExportProgress = { current: 0, total: tickIndices.length };
+
+      /** Runs resize → VideoFrame → encode for one output tick against an
+       * already-decoded bitmap. Returns false if the export was cancelled
+       * mid-stage. */
+      async function processTick(bitmap: ImageBitmap, tickIndex: number): Promise<boolean> {
+        const srcTexture = frameToTexture(device, bitmap);
+        const { texture: resizedTex } = resize(device, srcTexture, bitmap.width, bitmap.height, width, height);
+        srcTexture.destroy();
+
+        if (abort.signal.aborted) {
+          resizedTex.destroy();
+          return false;
+        }
+
+        const imageData = await textureToImageData(device, resizedTex, width, height);
+        resizedTex.destroy();
+
+        if (abort.signal.aborted) return false;
+
+        const timestamp = Math.round(tickIndex * outputIntervalUs);
+        const duration = Math.round(outputIntervalUs);
+        const frame = new VideoFrame(imageData.data, {
+          format: 'RGBA',
+          codedWidth: width,
+          codedHeight: height,
+          timestamp,
+          duration,
+        });
+        const ack = await worker.encodeFrame(frame);
+        webmExportProgress = { current: ack.framesEncoded, total: tickIndices.length };
+        return true;
+      }
+
+      // Same "at most one decoded bitmap alive at once" streaming discipline
+      // as GIF's export — see its own comment for why `tickIndices` being
+      // non-decreasing guarantees that.
+      webmExportStatus = `exporting ${tickIndices.length} frames (in/out ${from + 1}–${to + 1})…`;
+      const streamConfig: VideoDecoderConfig = {
+        codec: track.codec,
+        codedWidth: track.codedWidth,
+        codedHeight: track.codedHeight,
+        description: track.description,
+      };
+
+      let k = 0;
+      let pos = 0;
+      decodeLoop: for await (const frame of decodeFramesStreaming(streamConfig, rangeChunks)) {
+        if (abort.signal.aborted) {
+          frame.close();
+          cancelled = true;
+          break;
+        }
+
+        const sourceIndex = pos - leadInCount;
+        pos++;
+
+        if (sourceIndex < 0 || k >= tickIndices.length || sourceIndex < tickIndices[k]) {
+          frame.close();
+          continue;
+        }
+
+        const bitmap = await createImageBitmap(frame);
+        frame.close();
+        try {
+          while (k < tickIndices.length && tickIndices[k] === sourceIndex) {
+            webmExportStatus = `processing frame ${k + 1}/${tickIndices.length}…`;
+            const ok = await processTick(bitmap, k);
+            k++;
+            if (!ok) {
+              cancelled = true;
+              break decodeLoop;
+            }
+          }
+        } finally {
+          bitmap.close();
+        }
+
+        if (k >= tickIndices.length) break;
+      }
+
+      if (cancelled) {
+        webmExportStatus = 'export cancelled';
+        return;
+      }
+
+      webmExportStatus = 'finalizing WebM…';
+      const { bytes, mimeType } = await worker.finish();
+      const blob = new Blob([bytes], { type: mimeType });
+      webmExportUrl = URL.createObjectURL(blob);
+      webmExportBytes = bytes.length;
+      triggerDownload(webmExportUrl, 'video.webm');
+      webmExportStatus = `exported ${tickIndices.length} frames, ${width}×${height} @ ${outputFps}fps — ${bytes.length.toLocaleString()} bytes`;
+    } catch (err) {
+      if (!abort.signal.aborted) {
+        webmExportError = (err as Error).message;
+        webmExportStatus = `export error: ${(err as Error).message}`;
+      }
+    } finally {
+      worker.terminate();
+      webmExporting = false;
+      webmExportProgress = null;
+      exportAbort = null;
+    }
+  }
+
+  function cancelWebmExport() {
+    exportAbort?.abort();
   }
 </script>
 
@@ -73,12 +299,28 @@
 
   <svelte:fragment slot="side">
     <div class="stub-panel">
-      <p class="stub-title">WebM export — coming soon</p>
+      <p class="stub-title">WebM export</p>
       <p class="stub-body">
-        This scaffold proves the shared pipeline shell works for a second
-        consumer. Bitrate/keyframe controls and a real VP9 export (Phase
-        16/17) land next.
+        Resolution/fps/speed come from the shared quality defaults for now;
+        a WebM-specific bitrate + keyframe-interval panel lands in Phase 17.
       </p>
+    </div>
+
+    <div class="export-card">
+      <ExportBar
+        exporting={webmExporting}
+        disabled={!currentDemux}
+        progress={webmExportProgress}
+        statusText={webmExportStatus}
+        error={webmExportError}
+        downloadUrl={webmExportUrl}
+        downloadFilename="video.webm"
+        downloadBytes={webmExportBytes}
+        label="Export WebM"
+        encodingLabel="Encoding…"
+        on:encode={exportWebm}
+        on:cancel={cancelWebmExport}
+      />
     </div>
   </svelte:fragment>
 </PipelineShell>
@@ -110,5 +352,14 @@
     font-size: 0.8rem;
     color: #888;
     margin: 0;
+  }
+
+  .export-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 16px;
+    border: 1px solid #333;
+    border-radius: 6px;
   }
 </style>

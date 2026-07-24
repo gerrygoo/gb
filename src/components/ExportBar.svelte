@@ -10,6 +10,8 @@
   export let downloadUrl: string | null = null;
   export let downloadFilename = 'animation.gif';
   export let downloadBytes: number | null = null;
+  export let label = 'Export animated GIF';
+  export let encodingLabel = 'Encoding…';
 
   const dispatch = createEventDispatcher<{ encode: void; cancel: void }>();
 
@@ -19,7 +21,7 @@
 <div class="export-bar">
   <div class="row">
     <button class="primary" on:click={() => dispatch('encode')} disabled={exporting || disabled}>
-      {exporting ? 'Encoding…' : 'Export animated GIF'}
+      {exporting ? encodingLabel : label}
     </button>
     {#if exporting}
       <button class="cancel" on:click={() => dispatch('cancel')}>Cancel</button>

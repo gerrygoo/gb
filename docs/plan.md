@@ -215,7 +215,72 @@ the worked example of every wiring point below.
 > Done when: a user can export a trimmed/resized clip as a real,
 > playable `.webm` file (VP9 video, no audio) from `WebmApp.svelte`.
 
-**Handoff (post-Phase 15, 2026-07-23):** `WebmApp.svelte`
+**Handoff (post-Phase 16, 2026-07-23):** Encode works end-to-end and was
+verified live — not just by code review. This session's sandbox turned out
+to have real Apple Silicon GPU access via Playwright Chromium launched with
+`--use-gl=angle --use-angle=metal --enable-unsafe-webgpu
+--ignore-gpu-blocklist --enable-features=Vulkan` (default headless
+Chromium has no adapter at all; `navigator.gpu.requestAdapter()` returns
+`null` without those flags). With them, `requestAdapter()` returned a real
+`vendor: "apple", architecture: "metal-3"` adapter — confirmed via
+`adapter.info`, not SwiftShader. Two exports were run against a real
+h.264 test clip (ffmpeg `testsrc`, 320×240 @15fps, 2s): a full-range
+export and an in/out-trimmed one (frames 11–21). Both produced files
+`ffprobe` reports as valid VP9-in-WebM (`probe_score=100`), with exact
+expected duration (2.000s / 0.734s) and correct upscaled dimensions
+(640×480, from `computeOutputDims`'s 480p-preset default); frames pulled
+back out with `ffmpeg` and visually inspected showed correct, undistorted
+content at frame 0 and frame 15 (the moving gradient bar and tick-counter
+box both advanced correctly). No console/page errors in either run. This
+means the Phase 14/15 "not yet verified live" flags on the GPU
+resize/`onResized` path are now resolved too, at least for this sandbox —
+worth re-confirming in a real user-facing browser tab if behavior ever
+looks GPU-adapter-dependent, since headless-with-flags isn't identical to
+a normal Chrome tab.
+
+Implementation notes for whoever builds Phase 17 on top of this:
+
+- **`mediabunny`'s `VideoSampleSource` does the WebCodecs `VideoEncoder`
+  management internally** — no manual `VideoEncoder`/`EncodedVideoChunk`
+  plumbing was needed, contrary to `docs/webm-scoping.md`'s original
+  (pre-implementation) sketch. `webmEncodeWorker.ts` just constructs
+  `new VideoSampleSource({ codec: 'vp9', bitrate })`, wraps each incoming
+  `VideoFrame` in a `new VideoSample(frame)`, and calls
+  `videoSource.add(sample)` — mediabunny generates the VP9 codec string,
+  builds the `VideoEncoderConfig`, and feeds its own muxer.
+- **The `VideoFrame`-transfer-to-worker open question is resolved: it
+  works.** `webmEncodeClient.ts`'s `encodeFrame()` transfers the
+  `VideoFrame` itself (not an `ArrayBuffer` of pixel data) straight into
+  `webmEncodeWorker.ts`, which wraps it in a `VideoSample` and closes that
+  (which closes the underlying frame) once `add()` resolves. No canvas
+  round-trip needed in the worker at all.
+- **No offscreen canvas in the export loop either** — `exportWebm()`
+  builds each tick's `VideoFrame` directly from `textureToImageData()`'s
+  `ImageData` via the raw-buffer `VideoFrame` constructor
+  (`new VideoFrame(imageData.data, { format: 'RGBA', codedWidth,
+  codedHeight, timestamp, duration })`), skipping the
+  draw-to-canvas-then-capture step `docs/webm-scoping.md` and this phase's
+  original handoff assumed was necessary. `WebmApp.svelte`'s
+  `previewCanvas` is still used, but only for the live preview
+  (`handleResized`), not the export loop.
+- **`start()` round-trips an ack**, unlike the GIF client's fire-and-forget
+  `start()` — `VideoSampleSource.add()` throws if `output.start()` hasn't
+  resolved yet, so `webmEncodeClient.ts`'s `start()` awaits a `'started'`
+  message back from the worker before the caller is allowed to post any
+  `'frame'` message. A fire-and-forget `start()` here would be a real race,
+  not just a defensive nicety.
+- **Bitrate is currently a hardcoded heuristic**
+  (`BITS_PER_PIXEL = 0.06` in `WebmApp.svelte`, scaled by output
+  width×height×fps), not user-configurable — Phase 17's job. Resolution/
+  fps/speed already come from the shared `quality` store (same one
+  `QualityPanel.svelte` writes to on the GIF page; on the WebM page
+  they're invisible but still applied, sourced from
+  `resetQualityForSource`'s file-load defaults).
+- **`ExportBar.svelte`** gained `label`/`encodingLabel` props (defaulting
+  to the GIF app's existing text) so `WebmApp.svelte` could reuse it
+  as-is rather than forking a WebM-specific copy.
+
+**Superseded handoff (post-Phase 15, 2026-07-23):** `WebmApp.svelte`
 (`src/WebmApp.svelte`) already binds the full `PipelineShell` contract
 (`seeker`/`currentDemux`/`playhead`/`inPoint`/`outPoint`/
 `frameDurationUs`/`sourceWidth`/`sourceHeight`/`sourceBitmap`/
@@ -264,23 +329,36 @@ rather than creating a new one.
   building the full export loop on assumptions that haven't been
   checked yet.
 
-- [ ] Add `mediabunny` dependency (WebM muxer half only — `mp4box.js`
+- [x] Add `mediabunny` dependency (WebM muxer half only — `mp4box.js`
   stays the demuxer, unchanged).
-- [ ] Per-frame: reuse `resize.ts`'s GPU-resized texture → draw to
-  canvas → `new VideoFrame(canvas, { timestamp, duration })` → feed
-  `VideoEncoder` (VP9, bitrate-target config) → Mediabunny muxer's
-  `addEncodedVideoChunk` via the encoder's output callback.
-- [ ] Resolve the `VideoFrame`-transfer-to-worker open question (see
-  `docs/webm-scoping.md`) before committing to a main-thread-vs-worker
-  split for encode; fall back to main-thread encode if transfer proves
-  unreliable.
-- [ ] New `webmEncodeWorker.ts` / `webmEncodeClient.ts` /
-  `webmEncodeProtocol.ts` (or main-thread equivalent per the above),
-  mirroring the GIF app's worker split but carrying resized frames
-  instead of palette indices.
-- [ ] Timestamp/duration handling for the speed knob — scales the
-  continuous timestamp stream, not a discrete per-frame delay like GIF's
-  centisecond field.
+- [x] Per-frame: reuse `resize.ts`'s GPU-resized texture → read back to
+  `ImageData` → `new VideoFrame(imageData.data, { format: 'RGBA', ...,
+  timestamp, duration })` → `mediabunny`'s `VideoSampleSource` (wraps its
+  own internal VP9 `VideoEncoder`, bitrate-target config) → its `Output`
+  writes a `WebMOutputFormat`/`BufferTarget` Blob directly — no manual
+  `VideoEncoder`/`EncodedVideoChunk`/muxer plumbing needed, and no
+  intermediate canvas either (see Phase 16 handoff note above for why
+  this diverges from the plan as originally sketched).
+- [x] Resolved the `VideoFrame`-transfer-to-worker open question: it
+  works. `webmEncodeClient.ts` transfers the `VideoFrame` itself into
+  `webmEncodeWorker.ts`, which wraps it in a `VideoSample` and closes
+  that (closing the frame) once encoded.
+- [x] New `webmEncodeWorker.ts` / `webmEncodeClient.ts` /
+  `webmEncodeProtocol.ts`, mirroring the GIF app's worker split but
+  carrying resized `VideoFrame`s instead of palette indices. Unlike the
+  GIF client's fire-and-forget `start()`, this one's `start()` awaits a
+  `'started'` ack from the worker — `VideoSampleSource.add()` throws if
+  the mediabunny `Output` hasn't finished starting yet.
+- [x] Timestamp/duration handling for the speed knob — `exportWebm()` in
+  `WebmApp.svelte` samples source frames at the real output cadence
+  (`baseIntervalUs`, unaffected by speed) but scales the timestamps
+  actually written into the file by `outputIntervalUs = baseIntervalUs /
+  speed`, so speed changes playback rate without resampling content.
+- [x] Verified live end-to-end (see handoff note above): a real h.264
+  test clip exported successfully both full-range and in/out-trimmed,
+  producing `ffprobe`-valid VP9 WebM files with correct duration and
+  visually-correct decoded frames, using a real (non-SwiftShader) GPU
+  adapter.
 
 ## Phase 17 — WebM quality panel + size estimate
 > Done when: `WebmQualityPanel.svelte` exposes bitrate + keyframe
