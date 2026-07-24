@@ -207,8 +207,9 @@ the worked example of every wiring point below.
   owns the topbar and has no opinion on where the link points. Both
   apps link via absolute paths (`/webm/` and `/`) since the site is
   served from the domain root, not a GitHub Pages project subpath.
-- [ ] Deploy, confirm `gb.ggo.blue/webm/` resolves (and check the
-  no-trailing-slash `gb.ggo.blue/webm` case on GitHub Pages).
+- [x] Deploy, confirm `gb.ggo.blue/webm/` resolves (and check the
+  no-trailing-slash `gb.ggo.blue/webm` case on GitHub Pages). Both
+  live: `/webm/` -> 200, `/webm` -> 301 redirect to `/webm/`.
 
 ## Phase 16 — WebM encode pipeline
 > Done when: a user can export a trimmed/resized clip as a real,
