@@ -35,10 +35,10 @@ export class WebmEncodeWorkerClient {
   }
 
   /** Starts the mediabunny Output; resolves once it's ready to accept frames. */
-  start(bitrate: number): Promise<void> {
+  start(bitrate: number, keyFrameInterval: number): Promise<void> {
     return new Promise((resolve, reject) => {
       this.pending = { resolve: () => resolve(), reject };
-      this.worker.postMessage({ type: 'start', bitrate });
+      this.worker.postMessage({ type: 'start', bitrate, keyFrameInterval });
     });
   }
 

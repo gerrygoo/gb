@@ -365,11 +365,52 @@ rather than creating a new one.
 > interval + the shared resolution/fps/speed rows, and a live size
 > estimate tracks the exported file size closely.
 
-- [ ] `WebmQualityPanel.svelte`: resolution/fps/speed rows (reusing
+**Handoff (post-Phase 17, 2026-07-23):** Done, verified live against real
+VP9 output (not just the UI estimate) using the same headless-Chromium
+GPU-flag recipe Phase 16 established.
+
+- [x] `WebmQualityPanel.svelte`: resolution/fps/speed rows (reusing
   `quality.ts` helpers), bitrate slider (kbps), keyframe-interval field.
-  No palette/dither/color-space/loop rows — not applicable to WebM.
-- [ ] `estimateWebm.ts`: arithmetic estimate
-  (`bitrate_kbps * duration_s / 8 * 1000` + muxer-overhead constant) —
-  no sampling pass needed, unlike GIF's `estimate.ts`.
-- [ ] Wire into `SizeEstimate.svelte` (shared component, format-specific
-  estimate function passed in).
+  No palette/dither/color-space/loop rows — not applicable to WebM. Kept
+  `bitrateKbps`/`keyframeIntervalSec` as new fields on the *same* shared
+  `QualitySettings`/`quality` store rather than splitting GIF/WebM
+  stores apart — the existing precedent (GIF's palette/dither/loop
+  fields already sit alongside the shared resolution/fps/speed fields in
+  one store, each app's panel just not rendering the fields it doesn't
+  use) covers this fine; a real split is still unneeded since each app
+  is a separate page bundle with its own module state, so there's no
+  runtime cross-app bleed to worry about.
+- [x] `estimateWebm.ts`: arithmetic estimate
+  (`bitrate_kbps * duration_s / 8 * 1000` + a fixed muxer-overhead
+  constant) — no sampling pass needed, unlike GIF's `estimate.ts`, so
+  it runs synchronously in a plain `$:` block rather than through
+  `GifApp.svelte`'s debounced/abortable `runSizeEstimate` machinery.
+- [x] Wired into `SizeEstimate.svelte` — reused as-is (no prop-type
+  change needed; `WebmSizeEstimateResult` is structurally identical to
+  `SizeEstimateResult`).
+- [x] `bitrateKbps`/`keyframeIntervalSec` threaded all the way to the
+  real encoder, not just the UI estimate: `webmEncodeProtocol.ts`'s
+  `start` message gained a `keyFrameInterval` field,
+  `webmEncodeClient.ts`'s `start()` now takes `(bitrate, keyFrameInterval)`,
+  and `webmEncodeWorker.ts` passes both straight into mediabunny's
+  `VideoSampleSource({ codec: 'vp9', bitrate, keyFrameInterval })`.
+  `WebmApp.svelte`'s `exportWebm()` dropped the old
+  `BITS_PER_PIXEL`-heuristic bitrate guess entirely in favor of reading
+  `bitrateKbps`/`keyframeIntervalSec` straight from the `quality` store.
+- [x] Verified live: loaded a real h.264 test clip in headless Chromium
+  with real GPU access (Phase 16's `--use-gl=angle --use-angle=metal
+  --enable-unsafe-webgpu --ignore-gpu-blocklist --enable-features=Vulkan`
+  flags), confirmed the new Bitrate/Keyframe rows render, and confirmed
+  the size estimate updates live when dragging the bitrate slider
+  (~$610$ KB → ~$4.77$ MB at min vs. max on a 2s test clip). Then ran two
+  full exports at opposite ends of the bitrate range: output file size
+  scaled with the slider in the correct direction (28,852 bytes at
+  300 kbps vs. 97,593 bytes at 20,000 kbps — both well under their linear
+  estimates, expected since VP9 bitrate-target mode won't force bits
+  onto a visually-simple synthetic test clip). Both files
+  `ffprobe`-valid VP9-in-WebM at the correct 640×480/2.00s. Separately
+  confirmed keyframe-interval is real, not just accepted-and-ignored: at
+  the default 2s interval + 15fps output, `ffprobe`'s per-frame
+  `pict_type` showed exactly one `I` frame across all 30 frames; set to
+  1s, it showed `I` at frame 0 and again at frame 15 — exactly one
+  keyframe per second. No console/page errors in either run.

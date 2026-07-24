@@ -9,6 +9,9 @@ export interface WebmEncodeStartMessage {
    * dimensions aren't needed here — mediabunny infers them from the first
    * frame added. */
   bitrate: number;
+  /** Keyframe interval in seconds, passed straight through to mediabunny's
+   * `VideoEncodingConfig.keyFrameInterval` (its own default is 2s). */
+  keyFrameInterval: number;
 }
 
 export interface WebmEncodeFrameMessage {

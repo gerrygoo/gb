@@ -2,6 +2,8 @@
   import { onDestroy } from 'svelte';
   import { get } from 'svelte/store';
   import PipelineShell from './components/PipelineShell.svelte';
+  import WebmQualityPanel from './components/WebmQualityPanel.svelte';
+  import SizeEstimate from './components/SizeEstimate.svelte';
   import ExportBar from './components/ExportBar.svelte';
   import type { DemuxResult } from './lib/demux';
   import { decodeFramesStreaming, nearestKeyframeAtOrBefore } from './lib/decode';
@@ -10,11 +12,10 @@
   import { frameToTexture, resize, textureToImageData } from './lib/resize';
   import { WebmEncodeWorkerClient } from './lib/webmEncodeClient';
   import { quality, computeOutputDims } from './lib/quality';
+  import { estimateWebmSize, type WebmSizeEstimateResult } from './lib/estimateWebm';
 
   // Bound from PipelineShell — see GifApp.svelte / PipelineShell.svelte for
-  // why plain export + bind: is used instead of slot props. Most of these
-  // aren't read yet (encode lands in Phase 16) but are bound now so this
-  // stub matches the shell's full consumer contract from the start.
+  // why plain export + bind: is used instead of slot props.
   let seeker: FrameSeeker | null = null;
   let currentDemux: DemuxResult | null = null;
   let playhead = 0;
@@ -36,6 +37,22 @@
   let webmExportUrl: string | null = null;
   let webmExportBytes: number | null = null;
   let exportAbort: AbortController | null = null;
+
+  let sizeEstimate: WebmSizeEstimateResult | null = null;
+  // Arithmetic estimate (bitrate × duration) — unlike GIF's sampled/encoded
+  // estimate, this is cheap enough to run synchronously on every relevant
+  // change rather than debounced through an abortable async pass.
+  $: sizeEstimate =
+    sourceWidth && sourceHeight
+      ? estimateWebmSize({
+          sourceWidth,
+          sourceHeight,
+          inPoint,
+          outPoint,
+          avgFrameDurationUs: frameDurationUs,
+          quality: $quality,
+        })
+      : null;
 
   onDestroy(() => {
     resizedTexture?.destroy();
@@ -69,6 +86,7 @@
     webmExportStatus = '';
     webmExportError = null;
     webmExportBytes = null;
+    sizeEstimate = null;
   }
 
   function triggerDownload(url: string, filename: string) {
@@ -84,10 +102,6 @@
       webmExportUrl = null;
     }
   }
-
-  // Rough VP9 "medium-quality" bits-per-pixel-per-frame heuristic, used as a
-  // stand-in bitrate target until Phase 17 adds a user-facing kbps slider.
-  const BITS_PER_PIXEL = 0.06;
 
   /** The real per-frame encode path — structured like GifApp.svelte's
    * exportAnimatedGif (its own decodeFramesStreaming loop over the
@@ -121,11 +135,10 @@
     try {
       webmExportStatus = `preparing export (in/out ${from + 1}–${to + 1})…`;
       const { device } = await gpuContext;
-      const { targetWidth, fps: outputFps, speed } = get(quality);
+      const { targetWidth, fps: outputFps, speed, bitrateKbps, keyframeIntervalSec } = get(quality);
       const { width, height } = computeOutputDims(targetWidth, sourceWidth, sourceHeight);
 
-      const bitrate = Math.max(100_000, Math.round(width * height * outputFps * BITS_PER_PIXEL));
-      await worker.start(bitrate);
+      await worker.start(bitrateKbps * 1000, keyframeIntervalSec);
 
       // Build the output timeline from the encoded chunks' own `duration`,
       // same approach as GIF's export (see its own comment for why `duration`
@@ -298,15 +311,10 @@
   </svelte:fragment>
 
   <svelte:fragment slot="side">
-    <div class="stub-panel">
-      <p class="stub-title">WebM export</p>
-      <p class="stub-body">
-        Resolution/fps/speed come from the shared quality defaults for now;
-        a WebM-specific bitrate + keyframe-interval panel lands in Phase 17.
-      </p>
-    </div>
+    <WebmQualityPanel {sourceWidth} {sourceHeight} />
 
     <div class="export-card">
+      <SizeEstimate estimate={sizeEstimate} />
       <ExportBar
         exporting={webmExporting}
         disabled={!currentDemux}
@@ -330,28 +338,6 @@
     max-width: 100%;
     border: 1px solid #333;
     border-radius: 4px;
-  }
-
-  .stub-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 14px 16px;
-    border: 1px solid #333;
-    border-radius: 6px;
-  }
-
-  .stub-title {
-    font-size: 0.9rem;
-    font-weight: 600;
-    color: #ccc;
-    margin: 0;
-  }
-
-  .stub-body {
-    font-size: 0.8rem;
-    color: #888;
-    margin: 0;
   }
 
   .export-card {

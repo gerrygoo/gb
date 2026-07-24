@@ -27,7 +27,7 @@ worker.onmessage = async (e: MessageEvent<WebmEncodeInMessage>) => {
     switch (msg.type) {
       case 'start': {
         const target = new BufferTarget();
-        videoSource = new VideoSampleSource({ codec: 'vp9', bitrate: msg.bitrate });
+        videoSource = new VideoSampleSource({ codec: 'vp9', bitrate: msg.bitrate, keyFrameInterval: msg.keyFrameInterval });
         output = new Output({ format: new WebMOutputFormat(), target });
         output.addVideoTrack(videoSource);
         await output.start();

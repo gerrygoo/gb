@@ -8,22 +8,35 @@ export const RESOLUTION_PRESETS = [480, 320, 240, 160] as const;
 
 export { MAX_PALETTE_SIZE, MIN_PALETTE_SIZE };
 
+/** VP9 target-bitrate slider bounds, in kbps. */
+export const MIN_BITRATE_KBPS = 300;
+export const MAX_BITRATE_KBPS = 20_000;
+
+/** Keyframe-interval field bounds, in seconds. */
+export const MIN_KEYFRAME_INTERVAL_SEC = 1;
+export const MAX_KEYFRAME_INTERVAL_SEC = 10;
+
 export interface QualitySettings {
   /** Output width in pixels (even). Height is derived from source aspect ratio. */
   targetWidth: number;
   /** Output frame rate, 1–60. */
   fps: number;
-  /** Colors in the generated palette, 2–256 (q4). */
+  /** Colors in the generated palette, 2–256 (q4). GIF-only. */
   paletteSize: number;
-  /** When true, one palette is built from samples across the whole in/out range and shared by every frame (q5); when false (default), each frame gets its own palette. */
+  /** When true, one palette is built from samples across the whole in/out range and shared by every frame (q5); when false (default), each frame gets its own palette. GIF-only. */
   globalPalette: boolean;
+  /** GIF-only. */
   dither: DitherMode;
-  /** Color space the palette/quantize nearest-match distance is computed in (q7). */
+  /** Color space the palette/quantize nearest-match distance is computed in (q7). GIF-only. */
   colorSpace: ColorSpace;
-  /** 0 = infinite, per the Netscape looping extension. */
+  /** 0 = infinite, per the Netscape looping extension. GIF-only. */
   loopCount: number;
   /** Playback speed multiplier, 0.25–4. Scales export frame delay. */
   speed: number;
+  /** VP9 target bitrate in kbps. WebM-only. */
+  bitrateKbps: number;
+  /** VP9 keyframe interval in seconds. WebM-only. */
+  keyframeIntervalSec: number;
 }
 
 const DEFAULT_QUALITY: QualitySettings = {
@@ -35,6 +48,8 @@ const DEFAULT_QUALITY: QualitySettings = {
   colorSpace: 'srgb',
   loopCount: 0,
   speed: 1,
+  bitrateKbps: 2500,
+  keyframeIntervalSec: 2,
 };
 
 export const quality = writable<QualitySettings>({ ...DEFAULT_QUALITY });
