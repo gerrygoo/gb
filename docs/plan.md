@@ -215,6 +215,55 @@ the worked example of every wiring point below.
 > Done when: a user can export a trimmed/resized clip as a real,
 > playable `.webm` file (VP9 video, no audio) from `WebmApp.svelte`.
 
+**Handoff (post-Phase 15, 2026-07-23):** `WebmApp.svelte`
+(`src/WebmApp.svelte`) already binds the full `PipelineShell` contract
+(`seeker`/`currentDemux`/`playhead`/`inPoint`/`outPoint`/
+`frameDurationUs`/`sourceWidth`/`sourceHeight`/`sourceBitmap`/
+`gpuContext`) and has a working preview (`handleResized` draws
+`onResized`'s `imageData` to a canvas) — extend this file directly
+rather than creating a new one.
+
+- **The preview hook is not the export loop.** `handleResized` fires
+  once per *current* frame (on seek or quality-store change, via
+  PipelineShell's own single-flight resize queue) — it's preview-only
+  and should stay that way. The real per-frame encode path needs its own
+  function, structured like `GifApp.svelte`'s `exportAnimatedGif`
+  (~lines 276–484): its own `decodeFramesStreaming` loop over the
+  keyframe-aligned in/out range, its own direct `frameToTexture`/
+  `resize()` calls per tick (bypassing `PipelineShell` entirely, same as
+  GIF's export already does), fps-resampling via `nearestSourceIndex`
+  against a cumulative-duration timeline, and cancellation via
+  `AbortController`. Read that function end to end as the structural
+  template before writing WebM's version.
+- **What to strip vs. keep from the GIF template:** drop
+  histogram/palette/`medianCut`/`quantize`/dither entirely — the resized
+  `texture`/`imageData` goes straight to `VideoFrame` creation instead.
+  Keep the range/keyframe math, the tick-timeline construction, and the
+  "at most one decoded bitmap alive at once" streaming discipline
+  unchanged.
+- **Timestamps are the one real structural difference.** GIF's
+  `delayCs` is a discrete per-frame duration (centiseconds) written once
+  per encoded frame; VP9/WebM wants a continuous microsecond timestamp
+  stream (`new VideoFrame(canvas, { timestamp, duration })`), so the
+  speed knob should scale `frameStartUs`/`outputIntervalUs` directly
+  rather than scaling a single per-frame delay the way
+  `exportAnimatedGif`'s `delayCs = Math.max(1, Math.round(100 /
+  outputFps / speed))` does.
+- **Canvas source for `VideoFrame`:** `WebmApp.svelte`'s existing
+  `previewCanvas` demonstrates the `putImageData` pattern to crib from,
+  but the actual per-tick encode should draw into its own offscreen
+  canvas, not the visible preview one — otherwise the encode loop and
+  the preview's paint cycle fight over the same canvas.
+- **Not yet verified live.** The GPU resize path has carried an
+  unverified-live flag since Phase 14 (no WebGPU adapter in the sandbox
+  used for Phase 14 or 15). Phase 15's own testing was `tsc`/
+  `svelte-check`/`vite build` plus a static-file routing smoke test via
+  `vite preview` — none of it exercises WebGPU. Confirm
+  `frame.texture`/`imageData` and a real `VideoEncoder`/`VideoFrame`
+  round-trip work in an actual GPU browser early in this phase, before
+  building the full export loop on assumptions that haven't been
+  checked yet.
+
 - [ ] Add `mediabunny` dependency (WebM muxer half only — `mp4box.js`
   stays the demuxer, unchanged).
 - [ ] Per-frame: reuse `resize.ts`'s GPU-resized texture → draw to
